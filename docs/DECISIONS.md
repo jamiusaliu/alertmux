@@ -94,11 +94,12 @@ invent a value for it, count it into `SourceStatus.invalid_count`, and force
 into `ok` would lose that distinction; leaving it out of `partial` would let the API
 report complete data while dropping alerts.
 
-**Known gap.** Detection requires `numberMatched` and `numberReturned` to be
-integers. GeoServer can emit `"numberMatched": "unknown"`, in which case the flag
-fails **open** — defaulting to "complete" exactly when the server declines to say.
-The belt-and-braces rule (`returned >= max_features` also sets `truncated`) is
-tracked for v0.2.
+**Comparison alone is not enough.** Detection by `numberMatched > numberReturned`
+requires both to be integers. GeoServer can emit `"numberMatched": "unknown"`, in
+which case that test fails **open** — defaulting to "complete" exactly when the
+server declines to say. The belt-and-braces rule is therefore also applied:
+`returned >= max_features` sets `truncated` on its own, so a page filled to the
+cap is never reported as complete no matter what the server claimed it matched.
 
 **Longer term.** v0.1 *labels* truncation; it does not paginate. Real `startIndex`
 pagination is the proper remedy.

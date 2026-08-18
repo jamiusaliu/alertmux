@@ -255,11 +255,15 @@ class SwicAdapter:
 
         matched = payload.get("numberMatched")
         returned = payload.get("numberReturned")
+        matched = matched if isinstance(matched, int) else None
+        returned = returned if isinstance(returned, int) else None
+        # Belt-and-braces (D4). GeoServer WFS 1.1.0 can answer "unknown" for
+        # numberMatched, and the comparison alone would then fail open and call a
+        # capped page complete. A page filled to maxFeatures is treated as
+        # truncated whatever the server said it matched.
         truncated = (
-            isinstance(matched, int)
-            and isinstance(returned, int)
-            and matched > returned
-        )
+            matched is not None and returned is not None and matched > returned
+        ) or (returned is not None and returned >= self._max_features)
 
         return FetchResult(
             source_id=self.source_id,
@@ -268,6 +272,6 @@ class SwicAdapter:
             retrieved_at=retrieved_at,
             latency_ms=int((time.monotonic() - started) * 1000),
             truncated=truncated,
-            matched=matched if isinstance(matched, int) else None,
-            returned=returned if isinstance(returned, int) else None,
+            matched=matched,
+            returned=returned,
         )

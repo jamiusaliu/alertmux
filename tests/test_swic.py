@@ -348,3 +348,29 @@ def test_non_digit_string_code_stays_unmapped():
     assert "severity" in alert.unavailable_fields
     assert alert.urgency == "Expected"
     assert alert.certainty == "Observed"
+
+
+@respx.mock
+def test_full_page_is_truncated_even_when_matched_is_unknown():
+    """GeoServer WFS 1.1.0 can answer "unknown" for numberMatched. The
+    matched > returned comparison cannot fire on a string, so without the
+    maxFeatures rule a capped page would be reported as complete."""
+    payload = dict(FIXTURE, numberMatched="unknown", numberReturned=3)
+    respx.get(SwicAdapter.URL).mock(return_value=httpx.Response(200, json=payload))
+    result = SwicAdapter(max_features=3).fetch()
+    assert result.ok is True
+    assert result.truncated is True
+    assert result.matched is None
+    assert result.returned == 3
+
+
+@respx.mock
+def test_short_page_with_unknown_matched_is_not_truncated():
+    """Control for the test above: the same unusable numberMatched must not
+    flag truncation when the page came back under the cap."""
+    payload = dict(FIXTURE, numberMatched="unknown", numberReturned=3)
+    respx.get(SwicAdapter.URL).mock(return_value=httpx.Response(200, json=payload))
+    result = SwicAdapter(max_features=3000).fetch()
+    assert result.ok is True
+    assert result.truncated is False
+    assert result.matched is None
