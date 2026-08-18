@@ -192,3 +192,24 @@ def test_filtering_a_cached_response_does_not_poison_the_next_call():
     client = _client([FakeAdapter("wmo-swic", alerts=[_alert()])])
     assert client.get("/alerts?authority=us-noaa").json()["alerts"] == []
     assert len(client.get("/alerts").json()["alerts"]) == 1
+
+
+def test_health_does_not_poison_the_cache_for_a_later_alerts_call():
+    """/health takes the shared cached object rather than a deep copy, so it
+    must stay read-only. If it ever mutated the response, the next /alerts
+    call would see the damage."""
+    client = _client([FakeAdapter("wmo-swic", alerts=[_alert()])])
+    assert client.get("/health").status_code == 200
+    body = client.get("/alerts").json()
+    assert len(body["alerts"]) == 1
+    assert body["alerts"][0]["provenance"]["authority"] == "ng-nimet"
+
+
+def test_alerts_filter_does_not_poison_a_later_health_call():
+    """The reverse direction: /alerts still filters a private copy, so the
+    sources /health reports are unaffected by an earlier filtered request."""
+    client = _client([FakeAdapter("wmo-swic", alerts=[_alert()])])
+    assert client.get("/alerts?authority=us-noaa").json()["alerts"] == []
+    sources = client.get("/health").json()["sources"]
+    assert [s["source_id"] for s in sources] == ["wmo-swic"]
+    assert sources[0]["ok"] is True
