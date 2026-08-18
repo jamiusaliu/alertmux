@@ -165,8 +165,20 @@ class SwicAdapter:
                 return str(value) if value is not None else None
 
             def _named(key: str, table: dict[int, str]) -> str | None:
-                """Map a code only if it was verified. Never guess."""
-                return table.get(props.get(key))
+                """Map a code only if it was verified. Never guess.
+
+                SWIC emits s/u/c as JSON numbers, but some authorities send
+                them as digit strings ("3" instead of 3). A string key
+                against the int table misses silently and leaves the named
+                field null, so coerce digit strings to int before lookup.
+                Genuinely unmappable values (None, non-digit strings, codes
+                outside the verified table) still fall through to None and
+                land in unavailable_fields exactly as before.
+                """
+                raw = props.get(key)
+                if isinstance(raw, str) and raw.isascii() and raw.isdigit():
+                    raw = int(raw)
+                return table.get(raw)
 
             # The WFS list view carries no headline and no description;
             # both live only in the CAP file. `rlink` is a path to a

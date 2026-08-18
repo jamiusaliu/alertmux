@@ -310,3 +310,41 @@ def test_feature_without_event_fails_loudly():
     }
     with pytest.raises(ValueError, match="no event"):
         SwicAdapter().parse(bad, NOW)
+
+
+def test_severity_codes_as_digit_strings_still_map():
+    """Some SWIC authorities emit s/u/c as "3" instead of 3. A string key
+    against the int table used to miss silently and leave the named field
+    null. Digit-string codes must map to the same CAP names as their int
+    twins, with the raw string preserved in source_severity/urgency/certainty.
+    """
+    alert = SwicAdapter().parse(
+        _collection(_feature("f1", "xx-test-en/a.xml", s="3", u="3", c="4")),
+        NOW,
+    )[0]
+    assert alert.severity == "Severe"
+    assert alert.urgency == "Expected"
+    assert alert.certainty == "Observed"
+    assert alert.source_severity == "3"
+    assert alert.source_urgency == "3"
+    assert alert.source_certainty == "4"
+    assert "severity" not in alert.unavailable_fields
+    assert "urgency" not in alert.unavailable_fields
+    assert "certainty" not in alert.unavailable_fields
+
+
+def test_non_digit_string_code_stays_unmapped():
+    """A string that is not a digit (e.g. free-text severity) must not be
+    forced through the table; it stays unmapped and is recorded as
+    unavailable, exactly as an unverified int code would. Int codes on
+    the same feature are unaffected and still map.
+    """
+    alert = SwicAdapter().parse(
+        _collection(_feature("f1", "xx-test-en/a.xml", s="high", u=3, c=4)),
+        NOW,
+    )[0]
+    assert alert.severity is None
+    assert alert.source_severity == "high"
+    assert "severity" in alert.unavailable_fields
+    assert alert.urgency == "Expected"
+    assert alert.certainty == "Observed"
