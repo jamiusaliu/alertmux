@@ -91,6 +91,35 @@ def test_adapter_that_raises_is_reported_not_propagated():
     assert "kaboom" in response.sources[0].error
 
 
+def test_adapter_without_a_source_id_is_reported_as_unknown():
+    """collect() falls back to "unknown" so the failure handler cannot itself
+    raise on an adapter too broken to carry a source_id. Exploding above sets
+    one, so that branch is never reached by any other test."""
+
+    class Nameless:
+        def fetch(self):
+            raise RuntimeError("kaboom")
+
+    response = collect([Nameless()])
+    assert response.partial is True
+    assert response.sources[0].source_id == "unknown"
+    assert response.sources[0].ok is False
+    assert "kaboom" in response.sources[0].error
+
+
+def test_the_unknown_fallback_does_not_override_a_real_source_id():
+    """Control for the test above: an adapter that does carry a source_id must
+    still be reported under its own name when it raises."""
+
+    class Named:
+        source_id = "gdacs"
+
+        def fetch(self):
+            raise RuntimeError("kaboom")
+
+    assert collect([Named()]).sources[0].source_id == "gdacs"
+
+
 def test_all_sources_down_returns_empty_and_partial():
     response = collect([
         FakeAdapter("a", ok=False, error="down"),
