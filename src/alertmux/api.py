@@ -44,7 +44,11 @@ CACHE_TTL_SECONDS = 60.0
 # to 60s after that source has recovered. Re-check a partial result sooner.
 PARTIAL_CACHE_TTL_SECONDS = 10.0
 
+# _cache_lock guards the tuple below and is never held across a fetch.
+# _refresh_lock serialises the fetch itself, so a cold or expired cache
+# costs WMO and USGS one request rather than one per concurrent caller.
 _cache_lock = threading.Lock()
+_refresh_lock = threading.Lock()
 _cache: tuple[float, AlertsResponse] | None = None
 
 
@@ -64,6 +68,20 @@ def _ttl_for(response: AlertsResponse) -> float:
     return PARTIAL_CACHE_TTL_SECONDS if response.partial else CACHE_TTL_SECONDS
 
 
+def _fresh_cached() -> AlertsResponse | None:
+    """The cached response if it is still within its TTL, else None.
+
+    The TTL is per-response, not a constant: `_ttl_for` gives a degraded
+    fetch the shorter window. Reading `CACHE_TTL_SECONDS` here instead
+    would pin a partial result for the full minute and quietly undo #19.
+    """
+    with _cache_lock:
+        cached = _cache
+        if cached is not None and (time.monotonic() - cached[0]) < _ttl_for(cached[1]):
+            return cached[1]
+    return None
+
+
 def _collect_shared(adapters) -> AlertsResponse:
     """collect() behind the TTL cache, returning the *shared* cached object.
 
@@ -71,18 +89,28 @@ def _collect_shared(adapters) -> AlertsResponse:
     reachable from it. Anything that mutates the response -- notably the
     in-place `alerts` filter in /alerts -- must go through
     `_collect_cached()` instead, per D9.
+
+    A hit returns without taking the refresh lock. A miss takes it, and
+    re-checks the cache first: threads that queued behind an in-flight
+    fetch find the answer already there instead of firing their own.
     """
     global _cache
-    with _cache_lock:
-        cached = _cache
-        if cached is not None and (time.monotonic() - cached[0]) < _ttl_for(cached[1]):
-            return cached[1]
 
-    response = collect(adapters)
+    hit = _fresh_cached()
+    if hit is not None:
+        return hit
 
-    with _cache_lock:
-        _cache = (time.monotonic(), response)
-    return response
+    with _refresh_lock:
+        # Someone may have refreshed it while we waited for the lock.
+        hit = _fresh_cached()
+        if hit is not None:
+            return hit
+
+        response = collect(adapters)
+
+        with _cache_lock:
+            _cache = (time.monotonic(), response)
+        return response
 
 
 def _collect_cached(adapters) -> AlertsResponse:

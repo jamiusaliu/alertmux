@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -563,3 +564,84 @@ def test_a_healthy_fetch_is_not_rechecked_at_the_degraded_interval(monkeypatch):
     clock["t"] += api.PARTIAL_CACHE_TTL_SECONDS + 1
     client.get("/health")
     assert adapter.calls == 1
+
+
+def test_concurrent_cold_requests_trigger_one_fetch():
+    """The cache exists to spare WMO and USGS a request per call. If
+    collect() ran outside a refresh lock, N callers arriving on a cold
+    cache would each fire a full fetch -- exactly the burst the cache is
+    meant to prevent."""
+    import threading
+
+    started = threading.Barrier(8)
+
+    class Slow:
+        source_id = "wmo-swic"
+
+        def __init__(self):
+            self.calls = 0
+            self._lock = threading.Lock()
+
+        def fetch(self):
+            with self._lock:
+                self.calls += 1
+            # Long enough that every thread is inside the window a
+            # lock-free implementation would leave open.
+            time.sleep(0.2)
+            return FetchResult(
+                source_id=self.source_id, ok=True, alerts=[_alert()],
+                retrieved_at=NOW, latency_ms=1,
+            )
+
+    adapter = Slow()
+    client = _client([adapter])
+    results = []
+
+    def hit():
+        started.wait()
+        results.append(client.get("/health").status_code)
+
+    threads = [threading.Thread(target=hit) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results == [200] * 8
+    assert adapter.calls == 1, f"expected one fetch, got {adapter.calls}"
+
+
+def test_a_cache_hit_does_not_wait_on_an_in_flight_refresh():
+    """Control: the refresh lock must only serialise fetches. A caller
+    whose answer is already cached has to be served straight away, or the
+    lock would turn every slow fetch into a stall for everyone."""
+    import threading
+
+    release_fetch = threading.Event()
+
+    class Blocking:
+        source_id = "wmo-swic"
+
+        def __init__(self):
+            self.calls = 0
+
+        def fetch(self):
+            self.calls += 1
+            if self.calls > 1:
+                release_fetch.wait(timeout=5)
+            return FetchResult(
+                source_id=self.source_id, ok=True, alerts=[_alert()],
+                retrieved_at=NOW, latency_ms=1,
+            )
+
+    adapter = Blocking()
+    client = _client([adapter])
+
+    # Warm the cache.
+    assert client.get("/health").status_code == 200
+
+    # A second caller is served from the warm cache without touching the
+    # refresh lock at all; only one fetch has ever happened.
+    assert client.get("/health").status_code == 200
+    assert adapter.calls == 1
+    release_fetch.set()
