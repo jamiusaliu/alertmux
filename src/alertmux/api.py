@@ -49,7 +49,19 @@ PARTIAL_CACHE_TTL_SECONDS = 10.0
 # costs WMO and USGS one request rather than one per concurrent caller.
 _cache_lock = threading.Lock()
 _refresh_lock = threading.Lock()
-_cache: tuple[float, AlertsResponse] | None = None
+_cache: tuple[float, tuple[str, ...], AlertsResponse] | None = None
+
+
+def _cache_key(adapters) -> tuple[str, ...]:
+    """Which sources a cached response actually describes.
+
+    The cache is a module global but the adapter set is a parameter, so a
+    response fetched for one set must not be served to a caller asking for
+    another. Production only ever passes default_adapters(), so this is
+    latent there -- but tests override the dependency, and nothing stops a
+    future caller from doing the same.
+    """
+    return tuple(sorted(getattr(a, "source_id", "unknown") for a in adapters))
 
 
 def clear_cache() -> None:
@@ -68,17 +80,24 @@ def _ttl_for(response: AlertsResponse) -> float:
     return PARTIAL_CACHE_TTL_SECONDS if response.partial else CACHE_TTL_SECONDS
 
 
-def _fresh_cached() -> AlertsResponse | None:
-    """The cached response if it is still within its TTL, else None.
+def _fresh_cached(key: tuple[str, ...]) -> AlertsResponse | None:
+    """The cached response for `key` if still within its TTL, else None.
 
-    The TTL is per-response, not a constant: `_ttl_for` gives a degraded
-    fetch the shorter window. Reading `CACHE_TTL_SECONDS` here instead
-    would pin a partial result for the full minute and quietly undo #19.
+    Three things have to hold, and each is a separate bug if dropped: the
+    entry must exist, it must describe the same adapter set the caller
+    asked for, and it must be inside *its own* TTL. The TTL is
+    per-response, not a constant -- `_ttl_for` gives a degraded fetch the
+    shorter window, and reading `CACHE_TTL_SECONDS` here would pin a
+    partial result for the full minute and quietly undo #19.
     """
     with _cache_lock:
         cached = _cache
-        if cached is not None and (time.monotonic() - cached[0]) < _ttl_for(cached[1]):
-            return cached[1]
+        if (
+            cached is not None
+            and cached[1] == key
+            and (time.monotonic() - cached[0]) < _ttl_for(cached[2])
+        ):
+            return cached[2]
     return None
 
 
@@ -95,21 +114,22 @@ def _collect_shared(adapters) -> AlertsResponse:
     fetch find the answer already there instead of firing their own.
     """
     global _cache
+    key = _cache_key(adapters)
 
-    hit = _fresh_cached()
+    hit = _fresh_cached(key)
     if hit is not None:
         return hit
 
     with _refresh_lock:
         # Someone may have refreshed it while we waited for the lock.
-        hit = _fresh_cached()
+        hit = _fresh_cached(key)
         if hit is not None:
             return hit
 
         response = collect(adapters)
 
         with _cache_lock:
-            _cache = (time.monotonic(), response)
+            _cache = (time.monotonic(), key, response)
         return response
 
 

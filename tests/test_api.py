@@ -645,3 +645,40 @@ def test_a_cache_hit_does_not_wait_on_an_in_flight_refresh():
     assert client.get("/health").status_code == 200
     assert adapter.calls == 1
     release_fetch.set()
+
+
+def test_a_different_adapter_set_is_not_served_from_the_cache():
+    """The cache is a module global but `adapters` is a parameter. A
+    response fetched for one source set must not be handed to a caller
+    asking for a different one."""
+    first = FakeAdapter("wmo-swic", alerts=[_alert()])
+    second = FakeAdapter("usgs", alerts=[])
+
+    assert len(_client([first]).get("/alerts").json()["alerts"]) == 1
+
+    body = _client([second]).get("/health").json()
+    assert [s["source_id"] for s in body["sources"]] == ["usgs"]
+
+
+def test_the_same_adapter_set_still_hits_the_cache():
+    """Control: keying by source set must not defeat the cache for the
+    case production actually has, where the set never changes."""
+    class Counting:
+        source_id = "wmo-swic"
+
+        def __init__(self):
+            self.calls = 0
+
+        def fetch(self):
+            self.calls += 1
+            return FetchResult(
+                source_id=self.source_id, ok=True, alerts=[_alert()],
+                retrieved_at=NOW, latency_ms=1,
+            )
+
+    adapter = Counting()
+    client = _client([adapter])
+    client.get("/health")
+    client.get("/alerts")
+    client.get("/health")
+    assert adapter.calls == 1
