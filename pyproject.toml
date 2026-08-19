@@ -19,6 +19,7 @@ mcp = ["mcp>=2,<3"]
 [project.scripts]
 alertmux-mcp = "alertmux.mcp_server:main"
 alertmux-notify = "alertmux.notify.cli:main"
+alertmux-dashboard = "alertmux.dashboard.cli:main"
 
 [build-system]
 requires = ["hatchling"]
