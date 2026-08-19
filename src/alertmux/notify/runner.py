@@ -145,9 +145,20 @@ def run_once(
         if rule.max_per_run is not None and len(new_alerts) > rule.max_per_run:
             suppressed = len(new_alerts) - rule.max_per_run
             report.suppressed_by_rate_limit[rule.name] = suppressed
+            # Loud and specific: naming the rule and the exact count is
+            # the whole point (see cli.py's dry-run and real-run output,
+            # and DECISIONS.md D22's extension) -- an operator who only
+            # sees "some alerts were suppressed somewhere" cannot tell
+            # whether they are looking at a truncated hazard list. The
+            # remedy hint (digest, or a narrower rule) is included here
+            # rather than left for the docs, since a one-line hint in the
+            # warning is read; a docs paragraph usually is not.
             logger.warning(
-                "rule '%s': rate limit hit -- %d of %d new alert(s) suppressed "
-                "this run, will be retried next run (not recorded as notified)",
+                "rule '%s': per-run cap hit -- %d of %d new alert(s) suppressed "
+                "this run, will be retried next run (not recorded as notified). "
+                "Consider digest = true (one email summarising many) or a "
+                "narrower rule; raise max_per_run only if you deliberately want "
+                "more individual emails per run.",
                 rule.name,
                 suppressed,
                 len(new_alerts),

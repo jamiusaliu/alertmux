@@ -173,6 +173,75 @@ def test_digest_batches_into_one_message(tmp_path):
     assert all(state.seen(a.id) for a in alerts)
 
 
+def test_default_max_per_run_caps_a_large_first_run(tmp_path):
+    """A rule built with no `max_per_run` at all -- the shape an operator
+    gets from copying the README's example config -- must not deliver an
+    unbounded batch. Verified live on 2026-08-18: this exact shape (a
+    single `severity_at_least` rule, no cap) reported "1137 alert(s)
+    would be sent" against real NOAA data. This test stands in for that
+    with a smaller, deterministic batch."""
+    alerts = [_alert(f"a{i}") for i in range(200)]
+    rule = RuleConfig(name="uncapped-by-operator", to=("ops@example.org",))
+    state = _state(tmp_path)
+    sender = MagicMock()
+
+    report = run_once(_response(alerts), [rule], state, smtp_config=_smtp_config(), sender=sender, now=NOW)
+
+    assert rule.max_per_run == 40  # rules.DEFAULT_MAX_PER_RUN
+    assert sender.send.call_count == 40
+    assert report.sent_count == 40
+    assert report.suppressed_by_rate_limit["uncapped-by-operator"] == 160
+
+
+def test_max_per_run_none_is_still_unlimited_when_set_explicitly(tmp_path):
+    """An operator who deliberately opts out of the ceiling by passing
+    `max_per_run=None` explicitly must get exactly that -- the safe
+    default only applies when the operator leaves the field unset."""
+    alerts = [_alert(f"a{i}") for i in range(200)]
+    rule = RuleConfig(name="deliberately-unlimited", to=("ops@example.org",), max_per_run=None)
+    state = _state(tmp_path)
+    sender = MagicMock()
+
+    report = run_once(_response(alerts), [rule], state, smtp_config=_smtp_config(), sender=sender, now=NOW)
+
+    assert sender.send.call_count == 200
+    assert report.sent_count == 200
+    assert "deliberately-unlimited" not in report.suppressed_by_rate_limit
+
+
+def test_run_below_cap_is_unaffected_and_produces_no_suppression(tmp_path):
+    alerts = [_alert(f"a{i}") for i in range(5)]
+    rule = RuleConfig(name="under-cap", to=("ops@example.org",))  # default cap of 40
+    state = _state(tmp_path)
+    sender = MagicMock()
+
+    report = run_once(_response(alerts), [rule], state, smtp_config=_smtp_config(), sender=sender, now=NOW)
+
+    assert sender.send.call_count == 5
+    assert report.sent_count == 5
+    assert report.suppressed_by_rate_limit == {}
+
+
+def test_cap_applies_before_digest_so_digest_reflects_the_capped_set(tmp_path):
+    """Decision: the per-run cap applies first, then digest batches
+    whatever survives the cap into one email -- so a rule with both
+    `max_per_run` and `digest = true` never digests more alerts than the
+    cap allows in a single run. Documented in DECISIONS.md's extension
+    to D22."""
+    alerts = [_alert(f"a{i}") for i in range(10)]
+    rule = RuleConfig(name="digest-capped", to=("ops@example.org",), max_per_run=3, digest=True)
+    state = _state(tmp_path)
+    sender = MagicMock()
+
+    report = run_once(_response(alerts), [rule], state, smtp_config=_smtp_config(), sender=sender, now=NOW)
+
+    # One digest email, for exactly the 3 alerts the cap allowed through.
+    assert sender.send.call_count == 1
+    assert report.sent_count == 1
+    assert report.suppressed_by_rate_limit["digest-capped"] == 7
+    assert sum(1 for a in alerts if state.seen(a.id)) == 3
+
+
 def test_smtp_failure_is_loud_not_swallowed(tmp_path):
     alert = _alert("a1")
     rule = RuleConfig(name="r1", to=("ops@example.org",))

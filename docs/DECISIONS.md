@@ -904,6 +904,65 @@ richer scheduling (e.g. a rolling window rate limit instead of per-run)
 would be a refinement of this decision, not a reversal of shipping it
 now.
 
+**Extension, 2026-08-19 -- `max_per_run` defaults to 40, not `None`.**
+D22 shipped the cap mechanism in v0.5 but left `RuleConfig.max_per_run`
+defaulting to `None` (unlimited), which meant the cap only protected an
+operator who remembered to set it. Verified live: the README's own
+documented example config, reduced to a single `severity_at_least =
+"Severe"` rule with no `max_per_run`, reported "Dry run: 1137 alert(s)
+would be sent" on a first run against real NOAA data -- 1,137 individual
+emails from the config this project tells people to copy. That is
+exactly the mailbomb D22 was written to prevent, just moved one field
+over: the ceiling existed and worked, but the *default* configuration
+was still the dangerous one. The same "default to the safe direction"
+reasoning D20 applies to `include_unmapped_severity` was not applied
+here, and should have been from the start.
+
+**Decision.** `rules.DEFAULT_MAX_PER_RUN = 40` is now the default for
+`RuleConfig.max_per_run` and `notify.config.RuleConfigModel.max_per_run`.
+An operator who deliberately wants no ceiling still can: `RuleConfig`
+accepts `max_per_run=None` directly, and since TOML has no `null`, the
+config loader treats `max_per_run = 0` in a rule's TOML block as that
+same deliberate opt-out (`config.py`'s `_zero_means_unlimited`
+validator) -- a cap of literally zero alerts ever is not a configuration
+anyone wants, so reusing it as the "unlimited" sentinel costs nothing
+and needs no new TOML syntax. 40 sits comfortably above what a normal
+poll interval produces for one rule while staying small enough that a
+runaway cannot flood a mailbox before the operator sees the warning
+below.
+
+**Why the warning had to get louder, not just the default.** A capped
+default that fails silently just delays the same mistake: an operator
+who sees "Dry run: 40 alert(s) would be sent" with no further comment
+has no way to tell that 40 is a ceiling rather than the true count, and
+a silently truncated batch of hazard alerts is precisely the failure
+mode this project exists to prevent (the same principle 4 discipline
+D18/D20/D23 apply to unmapped fields and unrankable severity, applied
+here to a rate limit instead). So `runner.py`'s per-rule suppression
+warning now names the rule and the exact count and suggests the likely
+fix (`digest = true`, or narrow the rule, before raising the cap), and
+`cli.py` prints that same line in **both** dry-run and real-run output --
+previously it was only printed on a real send, so a dry run against the
+1,137-alert case above showed "Dry run: 40 alert(s) would be sent" with
+no indication that 1,097 more existed. Cap and digest interact in a
+fixed, documented order: the cap is applied to a rule's new alerts
+first, and `digest = true` then batches whatever survives the cap into
+one email, so a rule combining both never digests more than the cap
+allows in a single run (`tests/test_notify_runner.py`,
+`test_cap_applies_before_digest_so_digest_reflects_the_capped_set`).
+
+**Cost of being wrong.** The chosen behaviour risks an operator who
+copies the example config and later wants more than 40 individual
+emails per rule per run without reading the warning that names exactly
+that -- a nuisance, fixed by reading one line of output or the README.
+The rejected alternative (leaving the default at `None`) risks the
+mailbomb this note opened with, on a tool whose whole purpose is being
+trusted during a real severe-weather event.
+
+**What would justify changing it.** A different number could replace 40
+if real operational use showed it wrong in either direction; nothing
+found so far argues for reverting to an unlimited default.
+
 ## D23 — `expires: null` is treated as "unknown, keep it," never as "expired"
 
 **Decision.** `notify/runner.py`'s `filter_expired` drops an alert only

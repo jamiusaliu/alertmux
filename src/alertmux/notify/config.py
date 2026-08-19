@@ -23,7 +23,7 @@ from typing import Mapping
 
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
-from alertmux.notify.rules import SEVERITY_ORDER, RuleConfig
+from alertmux.notify.rules import DEFAULT_MAX_PER_RUN, SEVERITY_ORDER, RuleConfig
 
 _ENV_PREFIX = "ALERTMUX_SMTP_"
 
@@ -79,7 +79,15 @@ class RuleConfigModel(BaseModel):
     area_contains: str | None = None
     severity_at_least: str | None = None
     include_unmapped_severity: bool = True
-    max_per_run: int | None = None
+    # Safe-direction default: a rule left unconfigured is capped, not
+    # unlimited (see `rules.DEFAULT_MAX_PER_RUN` and DECISIONS.md D22).
+    # TOML has no `null`, so an operator who deliberately wants no ceiling
+    # writes `max_per_run = 0` -- `_zero_means_unlimited` below maps that
+    # to Python `None`, which is what `rules.RuleConfig`/`runner.py`
+    # already treat as "unlimited". A cap of *zero alerts ever* is not a
+    # configuration anyone wants, so reusing 0 as the "unlimited" sentinel
+    # costs nothing.
+    max_per_run: int | None = DEFAULT_MAX_PER_RUN
     digest: bool = False
 
     @field_validator("to")
@@ -96,6 +104,20 @@ class RuleConfigModel(BaseModel):
             raise ValueError(
                 f"severity_at_least={v!r} is not a CAP severity "
                 f"({sorted(SEVERITY_ORDER)}); check spelling and capitalisation"
+            )
+        return v
+
+    @field_validator("max_per_run")
+    @classmethod
+    def _zero_means_unlimited(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        if v == 0:
+            return None
+        if v < 0:
+            raise ValueError(
+                f"max_per_run={v!r} must be a positive cap, or 0 for "
+                "deliberately unlimited"
             )
         return v
 

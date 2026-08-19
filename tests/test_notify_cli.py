@@ -137,6 +137,24 @@ def test_unmapped_severity_warning_printed_in_dry_run(tmp_path, capsys):
     assert "gdacs" in out
 
 
+def test_dry_run_names_rule_and_count_when_cap_suppresses(tmp_path, capsys):
+    """The defect this fixes: a dry run must never read as complete when
+    the per-run cap truncated the batch. `CONFIG_TOML`'s rule has no
+    explicit `max_per_run`, so it gets the safe default of 40 -- 50
+    candidate alerts must trip it."""
+    config_path = _write(tmp_path, CONFIG_TOML)
+    alerts = [_alert(id=f"a{i}") for i in range(50)]
+
+    with patch("alertmux.notify.cli.collect", return_value=_response(alerts)):
+        rc = cli.main(["--config", config_path, "--dry-run"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "CAPPED" in out
+    assert "'all'" in out
+    assert "10 alert(s)" in out  # 50 candidates - cap of 40 = 10 suppressed
+
+
 def test_config_with_no_rules_exits_nonzero(tmp_path, capsys):
     config_path = _write(
         tmp_path,

@@ -40,6 +40,28 @@ def test_loads_smtp_and_rules(tmp_path):
     assert rules[0].name == "nigeria-severe"
     assert rules[0].severity_at_least == "Severe"
     assert rules[0].include_unmapped_severity is True  # safe default
+    assert rules[0].max_per_run == 40  # safe default, not None/unlimited
+
+
+def test_max_per_run_zero_means_deliberately_unlimited(tmp_path):
+    toml = BASIC_TOML + "\nmax_per_run = 0\n"
+    path = _write(tmp_path, toml)
+    config = load_config(path, env={})
+    assert config.rule_configs()[0].max_per_run is None
+
+
+def test_max_per_run_negative_rejected(tmp_path):
+    toml = BASIC_TOML + "\nmax_per_run = -1\n"
+    path = _write(tmp_path, toml)
+    with pytest.raises(ConfigError):
+        load_config(path, env={})
+
+
+def test_max_per_run_explicit_value_is_respected(tmp_path):
+    toml = BASIC_TOML + "\nmax_per_run = 5\n"
+    path = _write(tmp_path, toml)
+    config = load_config(path, env={})
+    assert config.rule_configs()[0].max_per_run == 5
 
 
 def test_env_overrides_password_and_host(tmp_path):

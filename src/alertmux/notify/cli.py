@@ -92,6 +92,20 @@ def main(argv: list[str] | None = None) -> int:
     for warning in report.warnings:
         print(f"WARNING: {warning}")
 
+    # Printed in both dry-run and real runs, and before the send/would-send
+    # summary below, since a suppressed count is the one thing an operator
+    # must never miss -- a silently truncated hazard list is exactly the
+    # failure mode this project exists to prevent. `report.dry_run_would_send`
+    # already reflects the cap (runner.py applies it before dry-run decides
+    # what to report), so without this line first, a dry run's "N alert(s)
+    # would be sent" reads as complete when it is not.
+    for rule_name, suppressed in report.suppressed_by_rate_limit.items():
+        print(
+            f"CAPPED: rule '{rule_name}' suppressed {suppressed} alert(s) this "
+            f"run by the per-run ceiling (will retry next run, not recorded as "
+            f"notified). Consider digest = true or a narrower rule."
+        )
+
     if args.dry_run:
         if report.dry_run_would_send:
             print(f"Dry run: {len(report.dry_run_would_send)} alert(s) would be sent:")
@@ -101,11 +115,8 @@ def main(argv: list[str] | None = None) -> int:
             print("Dry run: nothing would be sent.")
     else:
         print(f"Sent {report.sent_count} message(s).")
-        for rule_name, suppressed in report.suppressed_by_rate_limit.items():
-            print(
-                f"Rate limit: rule '{rule_name}' suppressed {suppressed} alert(s) this "
-                f"run (will retry next run)."
-            )
+
+    if not args.dry_run:
         if report.failures:
             print(f"{len(report.failures)} delivery failure(s):", file=sys.stderr)
             for failure in report.failures:

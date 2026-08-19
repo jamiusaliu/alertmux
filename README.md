@@ -162,6 +162,18 @@ TOML, loaded from a file plus environment variables for credentials
 committed to version control need not carry the password). Credentials
 are never logged, echoed, or included in any error message.
 
+**Every rule is capped by default.** A rule with no `max_per_run` gets
+40, not unlimited -- verified live, this exact config shape (a single
+`severity_at_least = "Severe"` rule, no cap set) reported "Dry run: 1137
+alert(s) would be sent" on a first run against real NOAA data. Raise the
+cap (`max_per_run = 200`) or remove it deliberately (`max_per_run = 0`,
+TOML has no `null`) only once you have decided you actually want that
+many individual emails; the usual fix for a rule that keeps hitting the
+cap is `digest = true` (one email summarising many) or a narrower rule,
+not a higher ceiling. When the cap suppresses anything,
+`alertmux-notify` says so loudly, by name and count, in both dry-run and
+real-run output -- see "What it guarantees" below.
+
 ```toml
 [smtp]
 host = "smtp.example.org"
@@ -183,7 +195,10 @@ severity_at_least = "Severe"
 # include_unmapped_severity defaults to true (the safe direction) --
 # this rule's severity filter is scoped to ng-nimet, which does carry a
 # mapped severity, so the default rarely matters here.
-max_per_run = 50
+# max_per_run raised above the default of 40: this authority is scoped
+# narrowly enough (one country) that a higher ceiling is a deliberate,
+# considered choice here, not an oversight.
+max_per_run = 200
 
 [[rules]]
 name = "global-earthquakes"
@@ -193,13 +208,20 @@ severity_at_least = "Severe"
 # GDACS's earthquakes never carry a mapped severity (D1/D18) -- left at
 # the default, they are still delivered, and alertmux-notify prints a
 # WARNING at startup naming gdacs explicitly so this is never a
-# surprise.
+# surprise. No max_per_run here: this rule relies on the default cap of
+# 40, and digest = true means a capped run still arrives as one email,
+# not 40.
 digest = true
 
 [[rules]]
 name = "everything-else"
 to = ["ops@example.org"]
-# No filters at all: every new, non-expired, deduplicated alert.
+# No filters at all: every new, non-expired, deduplicated alert. No
+# max_per_run here either -- this is the widest rule in the file, so it
+# is the one most likely to ever hit the default cap of 40. If it does,
+# alertmux-notify names it explicitly in the run output; that is the
+# signal to add digest = true or narrow the filters, not to raise the
+# number.
 ```
 
 Run it:
@@ -229,10 +251,14 @@ silently is worse than no notifier at all.
   expired would silently withhold a possibly-still-live hazard.
 - **Rate limit and digest.** `max_per_run` caps how many new alerts a
   rule sends in one run — the rest are retried next run, never marked
-  notified. `digest = true` batches a rule's new alerts into a single
-  email instead of one per alert. A severe-weather day producing
-  thousands of NOAA alerts needs both; an unthrottled notifier is a
-  mailbomb.
+  notified. It defaults to 40, not unlimited (`max_per_run = 0` opts a
+  rule deliberately into no cap). The cap applies first; `digest = true`
+  then batches whatever survives it into a single email instead of one
+  per alert. A severe-weather day producing thousands of NOAA alerts
+  needs both; an unthrottled notifier is a mailbomb. Whenever the cap
+  suppresses anything, `alertmux-notify` says so by name and count in
+  both dry-run and real-run output (`CAPPED: rule '...' suppressed N
+  alert(s) ...`), so a truncated run never reads as a complete one.
 - **Verbatim relay.** Each email carries the official `headline` and
   `description` unmodified, plus authority, source URL, retrieval time,
   onset, expiry (or an explicit "not stated by source" note) and the

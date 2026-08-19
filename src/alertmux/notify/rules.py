@@ -46,6 +46,21 @@ SEVERITY_ORDER: dict[str, int] = {
 # both are handled identically by `_severity_rank`.
 UNRANKABLE_SEVERITIES = frozenset({"Unknown"})
 
+# Safe-direction default for `RuleConfig.max_per_run` (see D22 in
+# DECISIONS.md, extended). Verified live on 2026-08-18: the README's
+# documented example config, with a single `severity_at_least = "Severe"`
+# rule and no cap, reported "Dry run: 1137 alert(s) would be sent" on a
+# first run -- 1,137 individual emails from the config this project tells
+# people to copy. `None` (unlimited) must stay expressible for an operator
+# who deliberately wants it, but it must never be the default: an
+# unthrottled default is a mailbomb, per the spec's own framing ("A
+# severe-weather day in the US NOAA set can produce thousands of alerts.
+# An unthrottled notifier is a mailbomb"). 40 sits comfortably above what
+# a normal poll interval produces for one rule while staying small enough
+# that a runaway cannot flood a mailbox before the operator notices the
+# loud warning `runner.py` prints when the cap is hit.
+DEFAULT_MAX_PER_RUN = 40
+
 
 @dataclass(frozen=True)
 class RuleConfig:
@@ -66,7 +81,11 @@ class RuleConfig:
     # severity this rule cannot evaluate is still delivered unless the
     # operator explicitly opts out.
     include_unmapped_severity: bool = True
-    max_per_run: int | None = None
+    # Safe-direction default (see `DEFAULT_MAX_PER_RUN` above): a rule
+    # left unconfigured is capped, not unlimited. An operator who wants
+    # no ceiling must set `max_per_run = 0` in TOML (there being no TOML
+    # null) which `config.py` maps to Python `None` here.
+    max_per_run: int | None = DEFAULT_MAX_PER_RUN
     digest: bool = False
 
 
