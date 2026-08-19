@@ -66,6 +66,15 @@ class StateConfig(BaseModel):
     prune_after_days: int = 30
 
 
+class RunLogConfig(BaseModel):
+    """Where each real run's outcome (sent/suppressed/failed) is
+    appended, so `alertmux-dashboard` can show a failed run without the
+    notifier process still being alive. See notify/runlog.py."""
+
+    path: str = "alertmux_notify_runs.jsonl"
+    max_entries: int = 500
+
+
 class RuleConfigModel(BaseModel):
     """The pydantic/TOML-facing shape of a rule. Converts to the frozen
     `rules.RuleConfig` dataclass that actually does the matching, so the
@@ -140,6 +149,7 @@ class NotifierConfig(BaseModel):
     smtp: SmtpConfig
     rules: list[RuleConfigModel] = Field(default_factory=list)
     state: StateConfig = Field(default_factory=StateConfig)
+    run_log: RunLogConfig = Field(default_factory=RunLogConfig)
 
     def rule_configs(self) -> list[RuleConfig]:
         """The pure, immutable `RuleConfig` dataclasses `rules.py` matches

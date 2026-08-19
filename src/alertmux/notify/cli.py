@@ -16,6 +16,7 @@ import sys
 from alertmux.adapters import default_adapters
 from alertmux.notify.config import ConfigError, load_config
 from alertmux.notify.delivery import SmtpSender
+from alertmux.notify.runlog import RunLogStore
 from alertmux.notify.runner import run_once
 from alertmux.notify.state import StateStore
 from alertmux.query import collect
@@ -121,6 +122,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{len(report.failures)} delivery failure(s):", file=sys.stderr)
             for failure in report.failures:
                 print(f"  {failure}", file=sys.stderr)
+
+        # Persisted regardless of report.ok: a clean run is worth
+        # recording too, so the dashboard can show "last run was clean"
+        # rather than only ever showing failures. Never on a dry run --
+        # see runlog.py's module docstring.
+        run_log = RunLogStore(config.run_log.path, max_entries=config.run_log.max_entries)
+        run_log.append(report)
 
     if not report.ok:
         return 1

@@ -85,18 +85,23 @@ def test_real_run_sends_via_smtpsender_and_exits_zero(tmp_path, capsys):
 
     with patch("alertmux.notify.cli.collect", return_value=_response([_alert()])), patch(
         "alertmux.notify.cli.SmtpSender"
-    ) as sender_cls, patch("alertmux.notify.cli.StateStore") as state_cls:
+    ) as sender_cls, patch("alertmux.notify.cli.StateStore") as state_cls, patch(
+        "alertmux.notify.cli.RunLogStore"
+    ) as run_log_cls:
         mock_state = MagicMock()
         mock_state.seen.return_value = False
         mock_state.prune.return_value = 0
         state_cls.return_value = mock_state
         mock_sender = MagicMock()
         sender_cls.return_value = mock_sender
+        mock_run_log = MagicMock()
+        run_log_cls.return_value = mock_run_log
 
         rc = cli.main(["--config", config_path])
 
     assert rc == 0
     mock_sender.send.assert_called_once()
+    mock_run_log.append.assert_called_once()
     out = capsys.readouterr().out
     assert "Sent 1 message" in out
 
@@ -108,7 +113,9 @@ def test_smtp_failure_exits_nonzero(tmp_path, capsys):
 
     with patch("alertmux.notify.cli.collect", return_value=_response([_alert()])), patch(
         "alertmux.notify.cli.SmtpSender"
-    ) as sender_cls, patch("alertmux.notify.cli.StateStore") as state_cls:
+    ) as sender_cls, patch("alertmux.notify.cli.StateStore") as state_cls, patch(
+        "alertmux.notify.cli.RunLogStore"
+    ) as run_log_cls:
         mock_state = MagicMock()
         mock_state.seen.return_value = False
         mock_state.prune.return_value = 0
@@ -116,10 +123,15 @@ def test_smtp_failure_exits_nonzero(tmp_path, capsys):
         mock_sender = MagicMock()
         mock_sender.send.side_effect = DeliveryError("boom")
         sender_cls.return_value = mock_sender
+        mock_run_log = MagicMock()
+        run_log_cls.return_value = mock_run_log
 
         rc = cli.main(["--config", config_path])
 
     assert rc == 1
+    mock_run_log.append.assert_called_once()
+    logged_report = mock_run_log.append.call_args.args[0]
+    assert logged_report.failures
     err = capsys.readouterr().err
     assert "delivery failure" in err.lower()
 
