@@ -37,6 +37,13 @@ app = FastAPI(
 # call, so a monitor polling every 30s hammered WMO and USGS. A whole-
 # result TTL cache in front of collect() fixes that without a dependency.
 CACHE_TTL_SECONDS = 60.0
+
+# A degraded fetch is cached too, or a flapping source would defeat the
+# cache entirely. But holding it for the full minute pins the failure:
+# /health keeps answering 503, and /alerts keeps omitting a source, for up
+# to 60s after that source has recovered. Re-check a partial result sooner.
+PARTIAL_CACHE_TTL_SECONDS = 10.0
+
 _cache_lock = threading.Lock()
 _cache: tuple[float, AlertsResponse] | None = None
 
@@ -46,6 +53,15 @@ def clear_cache() -> None:
     global _cache
     with _cache_lock:
         _cache = None
+
+
+def _ttl_for(response: AlertsResponse) -> float:
+    """How long this response stays fresh.
+
+    A complete fetch is good for the full TTL. A degraded one is re-checked
+    sooner, so recovery becomes visible in seconds rather than a minute.
+    """
+    return PARTIAL_CACHE_TTL_SECONDS if response.partial else CACHE_TTL_SECONDS
 
 
 def _collect_shared(adapters) -> AlertsResponse:
@@ -59,7 +75,7 @@ def _collect_shared(adapters) -> AlertsResponse:
     global _cache
     with _cache_lock:
         cached = _cache
-        if cached is not None and (time.monotonic() - cached[0]) < CACHE_TTL_SECONDS:
+        if cached is not None and (time.monotonic() - cached[0]) < _ttl_for(cached[1]):
             return cached[1]
 
     response = collect(adapters)

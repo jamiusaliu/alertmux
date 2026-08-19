@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 
 from alertmux.adapters.base import FetchResult
+from alertmux import api
 from alertmux.api import app, clear_cache, get_adapters
 from alertmux.schema import NormalisedAlert, Provenance
 
@@ -481,3 +482,84 @@ def test_alerts_endpoint_unaffected_by_detail_route_existing():
     body = client.get("/alerts").json()
     assert body["alerts"][0]["headline"] is None
     assert "headline" in body["alerts"][0]["unavailable_fields"]
+
+
+class _Recovering:
+    """Fails the first fetch, succeeds on every later one."""
+
+    source_id = "wmo-swic"
+
+    def __init__(self):
+        self.calls = 0
+
+    def fetch(self):
+        self.calls += 1
+        if self.calls == 1:
+            return FetchResult(
+                source_id=self.source_id, ok=False, error="down",
+                retrieved_at=NOW, latency_ms=1,
+            )
+        return FetchResult(
+            source_id=self.source_id, ok=True, alerts=[_alert()],
+            retrieved_at=NOW, latency_ms=1,
+        )
+
+
+def _frozen_clock(monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock["t"])
+    return clock
+
+
+def test_a_degraded_fetch_is_rechecked_before_the_full_ttl(monkeypatch):
+    """A source that recovers must stop being reported as down within
+    PARTIAL_CACHE_TTL_SECONDS, not the full minute."""
+    clock = _frozen_clock(monkeypatch)
+    adapter = _Recovering()
+    client = _client([adapter])
+
+    assert client.get("/health").status_code == 503
+
+    clock["t"] += api.PARTIAL_CACHE_TTL_SECONDS + 1
+    assert client.get("/health").status_code == 200
+    assert adapter.calls == 2
+
+
+def test_a_degraded_fetch_is_still_cached_within_its_shorter_ttl(monkeypatch):
+    """Control: the shorter TTL must still be a cache. A flapping source
+    would otherwise refetch on every single request."""
+    clock = _frozen_clock(monkeypatch)
+    adapter = _Recovering()
+    client = _client([adapter])
+
+    assert client.get("/health").status_code == 503
+    clock["t"] += api.PARTIAL_CACHE_TTL_SECONDS - 1
+    assert client.get("/health").status_code == 503
+    assert adapter.calls == 1
+
+
+def test_a_healthy_fetch_is_not_rechecked_at_the_degraded_interval(monkeypatch):
+    """Control in the other direction: the shorter TTL must apply only to
+    degraded responses, or the cache loses most of its value."""
+    clock = _frozen_clock(monkeypatch)
+
+    class Counting:
+        source_id = "wmo-swic"
+
+        def __init__(self):
+            self.calls = 0
+
+        def fetch(self):
+            self.calls += 1
+            return FetchResult(
+                source_id=self.source_id, ok=True, alerts=[_alert()],
+                retrieved_at=NOW, latency_ms=1,
+            )
+
+    adapter = Counting()
+    client = _client([adapter])
+
+    client.get("/health")
+    clock["t"] += api.PARTIAL_CACHE_TTL_SECONDS + 1
+    client.get("/health")
+    assert adapter.calls == 1
