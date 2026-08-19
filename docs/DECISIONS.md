@@ -755,6 +755,201 @@ defect.
 
 ---
 
+## D20 — Notifier severity rules default to delivering what they cannot rank
+
+**Decision.** `notify/rules.py`'s `evaluate_rule` treats an alert whose
+`severity` cannot be ranked against a rule's `severity_at_least` threshold
+(`severity is None`, or the legal-but-unrankable CAP value `"Unknown"`) as
+a distinct third outcome, not a silent "does not match": it is counted in
+`RuleMatch.unevaluable_count` and, by default
+(`RuleConfig.include_unmapped_severity = True`), still delivered.
+`warn_severity_rules_against_unmapped_sources` additionally prints a named
+warning, on every run including `--dry-run`, whenever a severity rule
+touches a source that contributes zero rankable severities in that fetch.
+
+**Why.** Measured live 18 Aug 2026, immediately before this build:
+
+```
+total alerts                                  2436
+  severity MAPPED   (a rule can match)        1809
+  severity UNMAPPED (rule cannot evaluate)     410   <- 397 GDACS, 2 tsunami, 8 SWIC, 3 USGS
+  no severity at all                           217
+```
+
+GDACS carries `severity=None` with `source_severity` set to an impact
+colour (`Green`/`Orange`/`Red`) because `alertlevel` is deliberately never
+mapped (D1's discipline, applied by GDACS's own adapter). tsunami.gov is
+the same by D17. A rule reading "notify me on Severe or above" evaluated
+naively against this data would silently deliver zero of the 397 GDACS
+alerts and zero of the 2 tsunami bulletins in this sample, while an
+operator reading their own config would have every reason to believe
+those sources were covered. That is exactly principle 4 (silent partial
+success is a bug) applied to the one place in this codebase where the
+"partial success" is an operator's belief that they are safe.
+
+**Why deliver by default rather than require an explicit opt-in.** The
+two failure directions are not symmetric. Delivering an alert the
+operator did not strictly ask for costs one extra, verbatim-labelled
+email — annoying, recoverable, and it still carries `source_severity` so
+the operator can see exactly why alertmux could not rank it. Withholding
+it costs a possible missed hazard warning, unrecoverable by definition.
+This is the same asymmetry D1 already applies to unverified severity
+codes and D13 applies to ambiguous duplicate groups, applied here to
+notification instead of translation or identity. An operator who has
+specifically evaluated their own risk tolerance can set
+`include_unmapped_severity = false` per rule to opt out — but that is an
+explicit, visible choice in their own config file, not this module's
+default.
+
+**Why the warning fires on every run, not only once at startup.** Source
+coverage of severity is a property of the *current* fetch, not a static
+fact about a source (a source could in principle start supplying a
+mappable code after a live-verified addition to its table, per D1). Rather
+than caching a stale "GDACS never maps severity" assertion, the warning is
+recomputed from the alerts actually in hand each run and named per
+source, so it degrades gracefully if a source's coverage ever changes
+instead of silently going stale itself.
+
+**Cost of being wrong.** A default of `include_unmapped_severity = false`
+would have made this decision invisible in exactly the way principle 4
+forbids: the operator's config would look reasonable, the notifier would
+run without error, and the silence itself would be the failure. The
+chosen default costs some operators an unwanted extra email for a source
+they explicitly do not care about — recoverable with one line of config,
+and now impossible to be unaware of, since the warning names the source
+either way.
+
+**What would justify changing it.** Evidence that the default is
+producing enough false-positive deliveries to be operationally
+unworkable, weighed against the cost of any single missed hazard alert
+under the alternative default — the same evidence bar D1 and D13 already
+set, applied here.
+
+## D21 — Notifier state is a flat, atomically-written JSON file, not a database
+
+**Decision.** `notify/state.py`'s `StateStore` is a single JSON file keyed
+by alert id, containing `{"notified_at": ..., "rule": ...}` per entry.
+Writes go through `tempfile.mkstemp` in the same directory followed by
+`os.replace`, never an in-place write.
+
+**Why a file, not sqlite or a real database.** The notifier is a single
+self-hosted process an operator runs on a schedule (cron, systemd timer);
+there is no concurrent writer to coordinate. A JSON file is directly
+inspectable and diffable by a human auditing "did we actually notify
+about this alert" without a client library — the same "boring and
+legible beats clever" reasoning already governing the rest of this
+codebase's dependency choices (four core packages, D14's optional `mcp`).
+
+**Why atomic writes specifically.** The seen-set is the entire mechanism
+that prevents the notified-once guarantee from becoming
+notified-every-run. A process killed mid-write (OOM, `SIGKILL`, a host
+reboot) writing in place would leave a truncated, unparseable JSON file —
+at which point the only recovery is either crashing forever or discarding
+the file and re-notifying everything it remembered, the exact mailbomb
+the rate limit and digest exist to prevent. Writing to a temp file and
+`os.replace`-ing it over the target means a crash at any point before the
+replace leaves the previous, valid file completely intact.
+
+**Why alert id, not (alert id, rule) as the key.** An alert already
+carries a stable identity (D2). Keying by id alone means an alert
+matching two different rules is recorded once and not re-sent by the
+second rule on a later run either — deliberate: from the operator's
+inbox, the alert is the same hazard regardless of which rule's filter
+happened to catch it first, and re-sending it because a second rule also
+matched would violate "one alert, one notification, ever" as stated in
+the spec, not honour it. The `rule` field on each entry is kept for
+audit/debugging, not for allowing a second send.
+
+**Cost of being wrong.** A key collision (two structurally different
+alerts sharing an id) would suppress a real notification — but D2 already
+established that ids are stable *because* they are derived from
+`capurl`, which is source-content-addressed; this decision inherits that
+guarantee rather than re-deriving it.
+
+**What would justify changing it.** Multiple notifier processes writing
+concurrently to the same state (e.g. a future clustered deployment) would
+need real locking or a database; nothing in the current spec calls for
+that, and adding it speculatively would be exactly the kind of
+unrequested complexity this codebase's dependency discipline exists to
+resist.
+
+## D22 — Rate limiting and digest are v0.5, not deferred to a later release
+
+**Decision.** `RuleConfig.max_per_run` (a hard ceiling on new
+notifications per rule per run) and `RuleConfig.digest` (batch a rule's
+new alerts into one email instead of one per alert) shipped in the same
+build as the notifier itself, per the spec's explicit instruction.
+
+**Why this could not wait.** The spec's own framing states it plainly: "A
+NOAA severe-weather day can produce thousands of alerts... An unthrottled
+notifier is a mailbomb." This is not a hypothetical for this codebase —
+D19 records that `all_hour` (an earlier USGS feed choice) produced enough
+volume on its own to justify switching feeds, and NWS's active-alerts feed
+is exactly the kind of source that spikes hard during a real severe-weather
+outbreak. Shipping the notifier without a ceiling would mean the first
+real severe-weather day becomes the incident that teaches this lesson,
+against an operator's actual inbox, for a tool whose entire purpose is
+being trusted during exactly that kind of event.
+
+**Why suppressed alerts are not marked notified.** When `max_per_run`
+caps a rule's batch, the alerts past the cap are left out of state
+entirely (`runner.py`'s `run_once`) rather than being silently dropped or
+recorded as sent. The next run's rule evaluation sees them again as new,
+so a sustained flood is throttled every run rather than losing the
+overflow permanently — the same "loud, not silent" discipline principle 4
+requires elsewhere, applied to a rate limit instead of a fetch failure.
+
+**What would justify changing it.** Nothing found so far; a case for
+richer scheduling (e.g. a rolling window rate limit instead of per-run)
+would be a refinement of this decision, not a reversal of shipping it
+now.
+
+## D23 — `expires: null` is treated as "unknown, keep it," never as "expired"
+
+**Decision.** `notify/runner.py`'s `filter_expired` drops an alert only
+when `expires` is set *and* in the past. An alert with `expires: null` is
+always kept.
+
+**Why.** `unavailable_fields`/`unmapped_fields` (D18) already established
+that a `null` field is ambiguous without a label, and the notifier cannot
+attach one at filter time — it would have to inspect
+`alert.unavailable_fields` per alert to know whether "no expiry" means
+"the source states this alert does not expire" or "the source simply
+never supplies this field." As of this build, `expires` is available for
+NWS natively and for SWIC via opt-in CAP detail (D16); GDACS, EONET and
+tsunami.gov structurally never supply it (see each adapter's
+`STRUCTURAL_GAPS`). Treating an unstated expiry as "already expired"
+would silently withhold every alert from those sources regardless of
+whether the hazard is still live — the identical failure direction D20
+refuses for severity, applied to expiry instead.
+
+**Cost of being wrong.** The chosen behaviour risks notifying about an
+alert that has, in fact, lapsed at the source but never said so — a
+nuisance, correctable by the operator reading the alert's own text (which
+is relayed verbatim and will usually say so). The rejected alternative
+risks the opposite: never notifying about a live hazard from a source
+that cannot state its own expiry, which is unrecoverable in the moment
+that matters.
+
+**What would justify changing it.** A per-source, verified table of "this
+source's alerts always resolve within N hours even when it does not state
+`expires`" would allow a source-specific fallback window — no such table
+exists yet, and inventing one without evidence would repeat the mistake
+D1 refuses to make for severity codes.
+
+## Notifier: `api.py` was explicitly out of scope for this build
+
+`docs/superpowers/specs/2026-08-17-alertmux-design.md`'s Notifier section
+states "SMTP failure surfaces on the dashboard and in `/health`." This
+build did not touch `api.py` or `tests/test_api.py` at all: three outside
+contributors have open PRs rewriting `api.py`'s cache, and adding a fourth
+concurrent editor mid-rebase was judged a worse cost than deferring one
+line item. SMTP failure is still loud where the notifier itself runs (a
+non-zero process exit, an ERROR-level log line, and the failed alert
+staying out of state for automatic retry — see D20 through D23) — it is
+just not yet visible through the HTTP API's `/health` endpoint. Tracked as
+a follow-up issue rather than silently dropped from scope.
+
 ## Things we got wrong, kept here on purpose
 
 Recorded because the failure *modes* recur, and because a project that only documents

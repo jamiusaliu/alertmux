@@ -123,6 +123,131 @@ the relay disclaimer and the `partial`/`truncated` flags from the query
 layer, so a model relaying the answer can say plainly when data is missing
 or incomplete rather than reporting it as a clean "no alerts."
 
+## Notifications
+
+`alertmux-notify` is a self-hosted SMTP notifier: you configure rules
+("email me when NiMet issues a Severe alert for Nigeria"), point it at
+your own SMTP relay, and run it on a schedule (cron, systemd timer). It
+ships no mail infrastructure and no default sender (D11) — you bring
+your own SMTP and your own subscriptions, for yourself, which is what
+keeps this on the safe side of the line between relaying official feeds
+and mass-notifying strangers.
+
+**The design problem this had to solve.** A rule that says "notify on
+Severe or above" cannot be evaluated for a source that never carries a
+mapped `severity` — GDACS's `alertlevel` is an impact score, not CAP
+severity, and tsunami.gov's bulletin category is deliberately never
+mapped either (D1/D17/D18). Naively, such a rule would silently deliver
+zero GDACS earthquakes and zero tsunami bulletins while the operator
+believed they were covered — a life-safety failure. `alertmux-notify`
+makes this impossible to walk into three ways:
+
+1. Every severity-threshold rule reports how many alerts it *could not
+   evaluate* (`unevaluable_count`), never silently drops them from
+   consideration.
+2. At the start of every run it warns loudly, naming the specific
+   sources, when a severity rule would touch a source that never carries
+   a mapped severity in that fetch.
+3. **The default is to deliver, not withhold.** An alert whose severity
+   cannot be evaluated is still sent unless a rule explicitly sets
+   `include_unmapped_severity = false`. A false positive costs an extra
+   email; a false negative costs a missed hazard warning — see
+   `docs/DECISIONS.md`'s notifier entry for the full reasoning.
+
+### Config
+
+TOML, loaded from a file plus environment variables for credentials
+(`ALERTMUX_SMTP_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD` / `_SENDER` /
+`_USE_TLS` / `_USE_SSL` override the `[smtp]` block, so a config file
+committed to version control need not carry the password). Credentials
+are never logged, echoed, or included in any error message.
+
+```toml
+[smtp]
+host = "smtp.example.org"
+port = 587
+username = "alerts@example.org"      # or leave unset and rely on env
+password = "set-via-env-instead"     # ALERTMUX_SMTP_PASSWORD overrides this
+use_tls = true                       # STARTTLS; mutually exclusive with use_ssl
+sender = "alerts@example.org"
+
+[state]
+path = "alertmux_notify_state.json"  # survives restart, prunable
+prune_after_days = 30
+
+[[rules]]
+name = "nigeria-severe"
+to = ["ops@example.org"]
+authority = "ng-nimet"
+severity_at_least = "Severe"
+# include_unmapped_severity defaults to true (the safe direction) --
+# this rule's severity filter is scoped to ng-nimet, which does carry a
+# mapped severity, so the default rarely matters here.
+max_per_run = 50
+
+[[rules]]
+name = "global-earthquakes"
+to = ["ops@example.org"]
+event_contains = "earthquake"
+severity_at_least = "Severe"
+# GDACS's earthquakes never carry a mapped severity (D1/D18) -- left at
+# the default, they are still delivered, and alertmux-notify prints a
+# WARNING at startup naming gdacs explicitly so this is never a
+# surprise.
+digest = true
+
+[[rules]]
+name = "everything-else"
+to = ["ops@example.org"]
+# No filters at all: every new, non-expired, deduplicated alert.
+```
+
+Run it:
+
+```bash
+alertmux-notify --config notify.toml --dry-run   # preview, sends nothing
+alertmux-notify --config notify.toml              # actually sends
+```
+
+Non-zero exit on any SMTP failure or invalid config — schedule it with a
+runner that alerts on a failing exit code, since a notifier that fails
+silently is worse than no notifier at all.
+
+### What it guarantees
+
+- **Cross-source dedupe.** Uses `dedupe.py`'s duplicate groups: when SWIC
+  and NWS both carry the same NOAA warning, only the `preferred_id`
+  record is ever considered, so a matching rule fires once, not once per
+  source.
+- **Across-poll dedupe.** A JSON state file keyed by alert id (ids are
+  stable by design, D2), so the same alert is never re-notified on the
+  next run. Survives restart; prunable so it never grows forever.
+- **Respects `expires`.** An alert past its stated expiry is never sent.
+  Where a source does not state `expires` at all, the alert is *kept* —
+  the schema cannot distinguish "never expires" from "the source did not
+  say" (`unavailable_fields`), and treating an unknown expiry as already
+  expired would silently withhold a possibly-still-live hazard.
+- **Rate limit and digest.** `max_per_run` caps how many new alerts a
+  rule sends in one run — the rest are retried next run, never marked
+  notified. `digest = true` batches a rule's new alerts into a single
+  email instead of one per alert. A severe-weather day producing
+  thousands of NOAA alerts needs both; an unthrottled notifier is a
+  mailbomb.
+- **Verbatim relay.** Each email carries the official `headline` and
+  `description` unmodified, plus authority, source URL, retrieval time,
+  onset, expiry (or an explicit "not stated by source" note) and the
+  standing relay disclaimer. Nothing is reworded or summarised.
+
+### Known gap
+
+The spec called for SMTP failure to also surface on the dashboard and in
+`/health`. `api.py` currently has open PRs rewriting its cache, so
+touching it here was ruled explicitly out of scope for this build — the
+notifier is a separate process and does not expose an HTTP endpoint of
+its own. SMTP failure is still loud (non-zero exit, ERROR-level log, and
+the alert stays unmarked in state for retry) — it just is not visible
+through `/health` yet. Tracked as a follow-up issue.
+
 ## An example alert
 
 A real warning from the Nigerian Meteorological Agency, as alertmux returns it:

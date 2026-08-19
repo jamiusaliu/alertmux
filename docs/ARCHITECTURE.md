@@ -31,6 +31,12 @@ One direction. No writes to any external system. No state except a 60-second cac
 | `registry.py` | `/authorities` — WMO Register of Alerting Authorities (directory, not alerts), embedded ISO 3166-1 alpha-3→alpha-2 table, country-level coverage join, long-TTL cache |
 | `api.py` | FastAPI, TTL cache, HTTP status semantics |
 | `mcp_server.py` | MCP presentation (optional `mcp` extra) — four tools over the same cached `collect()` path |
+| `notify/config.py` | Notifier config — TOML plus environment overrides, SecretStr-guarded credentials |
+| `notify/rules.py` | Pure rule matching over `NormalisedAlert`, no I/O — the unmapped-severity counting and safe-default logic |
+| `notify/state.py` | Persistent JSON seen-state, atomic writes, prunable |
+| `notify/delivery.py` | SMTP delivery via stdlib `smtplib`, verbatim relay message building |
+| `notify/runner.py` | One poll cycle: expiry filter, cross-source dedupe, rule evaluation, rate limit, digest, delivery, state |
+| `notify/cli.py` | `alertmux-notify` console script |
 
 An adapter knows its own source's quirks and **nothing** about any other adapter,
 the query layer, or the API. That isolation is what makes adding a feed a one-file
@@ -406,8 +412,99 @@ no tsunami source). Surfacing it as a dedicated, prominently-described
 tool makes it something a model is likely to check before asserting an
 absence, rather than a field buried in a larger coverage report.
 
+## notify/ — the self-hosted notifier
+
+Deliberately isolated from `api.py`: no shared module, no imports in
+either direction beyond `notify/cli.py` and `notify/runner.py` calling
+`alertmux.query.collect()` and `alertmux.adapters.default_adapters()`,
+the same read-only entry points `api.py` itself uses. This is a process
+concern, not an HTTP surface — it has no endpoints, and touching
+`api.py` was explicitly out of scope for this build (three outside
+contributors have open PRs rewriting its cache).
+
+```
+config.py ──> rules.py (pure) ──┐
+state.py ────────────────────────┼──> runner.py ──> cli.py
+delivery.py ─────────────────────┘
+```
+
+- **`config.py`** loads `[smtp]` / `[state]` / `[[rules]]` from a TOML
+  file via stdlib `tomllib`, with `ALERTMUX_SMTP_*` environment variables
+  overriding the `[smtp]` block so a committed config file need not carry
+  a password. `SmtpConfig.password` is a pydantic `SecretStr` specifically
+  so an accidental `str(config)`/`repr(config)`/log call cannot print it;
+  `ConfigError` messages are built only from field names and validation
+  reasons, never the raw parsed dict, so a validation failure elsewhere in
+  the file cannot leak a password sitting next to it.
+
+- **`rules.py`** is pure: `evaluate_rule(rule, alerts)` takes data, returns
+  data, touches no filesystem, network or clock. This is what makes the
+  unmapped-severity design flaw testable in isolation — see below.
+
+- **`state.py`**'s `StateStore` is a flat JSON file keyed by alert id
+  (D2: stable, derived from `capurl`), so "already notified" is a
+  membership check. Writes go through a temp file plus `os.replace` so a
+  crash mid-write cannot corrupt the file into something that reads as
+  "notify everything again."
+
+- **`delivery.py`** wraps stdlib `smtplib` only — no new dependency, no
+  default sender (D11). `build_alert_message`/`build_digest_message`
+  assemble the verbatim relay fields (headline, description, authority,
+  source URL, retrieved_at, onset, expires, `DISCLAIMER`) into an
+  `EmailMessage`; nothing here reformats hazard text. `SmtpSender.send`
+  never swallows an SMTP exception — it raises `DeliveryError`, built only
+  from host/port and the underlying exception's own type/message, never
+  from `SmtpConfig` itself.
+
+- **`runner.py`**'s `run_once` is one poll cycle over an
+  already-collected `AlertsResponse`: drop expired alerts (an *unknown*
+  expiry is kept, never treated as expired — the same safe-direction
+  default as the severity rule), collapse each cross-source duplicate
+  group down to its `preferred_id` record only (D13 — so a rule matching
+  both SWIC's and NWS's copy of one NOAA warning fires once), evaluate
+  every rule, cap new alerts at `max_per_run`, optionally batch into one
+  digest email, and persist state only for alerts actually delivered. An
+  SMTP failure is logged at ERROR and left out of state on purpose, so
+  the next run retries it instead of the alert being silently lost.
+
+- **`cli.py`** is the thin `alertmux-notify` entry point: load config,
+  prune state, `collect()`, `run_once()`, print a summary, exit non-zero
+  on any delivery failure or invalid config.
+
+### The unmapped-severity design flaw, and how this module refuses it
+
+A rule reading "notify on Severe or above" cannot be evaluated against an
+alert whose `severity` is `None` — which is every GDACS alert (D1: its
+`alertlevel` is an impact score, never mapped to CAP severity) and every
+tsunami.gov bulletin (D17: its bulletin category is deliberately never
+mapped). Silently treating "cannot evaluate" as "does not match" would
+mean a life-safety notifier configured for "Severe or above" delivers
+zero GDACS earthquakes and zero tsunami warnings while the operator
+believes they are covered.
+
+`evaluate_rule` in `rules.py` never takes that path. For every alert a
+severity-threshold rule cannot rank (a `None` severity, or the legal-but-
+unrankable CAP value `"Unknown"` NWS can emit), it increments
+`RuleMatch.unevaluable_count` and records the source, regardless of
+whether the alert ends up included or excluded. `RuleConfig.
+include_unmapped_severity` defaults to `True`: absent an explicit
+operator opt-out, an unrankable alert is still delivered — a missed
+hazard is the unrecoverable failure direction, an extra email is not, the
+same asymmetry D1 and D13 already apply elsewhere in this codebase.
+`warn_severity_rules_against_unmapped_sources` runs at the start of every
+`run_once` call (dry-run included) and produces one message per
+(rule, source) pair where a severity rule touches a source that never
+contributes a rankable severity in that fetch — naming the source
+explicitly, so this is a printed warning on every run, not a fact the
+operator has to go looking for. See DECISIONS.md's notifier entry for the
+measured counts that motivated this and the full design reasoning.
+
 ## What is deliberately absent
 
-No notifications, no alert issuing, no accounts, no database, no frontend. v0.1 reads
-official feeds and normalises them. The boundary is legal as well as architectural —
-see `DECISIONS.md`.
+`api.py` gained no notifier-related endpoints in this build (see
+`notify/`'s section above for why) — SMTP failure surfacing on `/health`
+remains a follow-up issue, not a design rejection. No accounts, no
+database, no frontend. alertmux reads official feeds, normalises them,
+and (as of the notifier) can relay matching alerts to an operator's own
+inbox; it still never originates a warning. The boundary is legal as
+well as architectural — see `DECISIONS.md`.
