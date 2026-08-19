@@ -1091,6 +1091,42 @@ atomic-write way as `state.py`). Negligible against the alternative: a
 failed notifier that looks, from the dashboard, identical to a notifier
 that was never run.
 
+## D27 - Notifier config keys are validated strictly, not ignored
+
+**Decision.** `notify/config.py` now rejects any TOML section it does
+not read (`[bogus]`) and any key inside `[smtp]`, `[state]`,
+`[run_log]`, or `[[rules]]` it does not recognise (`pathh`,
+`max_entires`), via pydantic's `extra="forbid"` on every config model
+plus an explicit check of top-level section names before the file is
+parsed into `NotifierConfig`. Both fail loudly with `ConfigError`,
+naming the offending key. Errors are built from each pydantic error's
+`loc`/`msg` only, never `err["input"]` -- pydantic's own rendering of an
+`extra_forbidden` error embeds the value written under the bad key,
+which would otherwise leak a credential typed under a misspelled field
+name (e.g. `passwrd = "..."` instead of `password = "..."`).
+
+**Why.** An end-to-end run (not the unit suite) found `load_config`
+silently discarding the entire `[run_log]` section: `run_log.path` from
+a real config file parsed straight to the hardcoded default, with no
+error and no warning. `state.path` from the same file was honoured, so
+the config looked correct on inspection. The dashboard reads the run log
+from `config.run_log.path` -- so a real deployment pointing its
+dashboard at a configured path would show "no runs recorded" while the
+notifier was actually running (and possibly failing) against the
+default path the whole time. A silently ignored setting is
+indistinguishable from a working one until something downstream is
+quietly wrong, and here the something downstream was the exact
+monitoring surface (D26) this project built to catch failures. Strict
+validation turns that class of bug into an immediate, named error at
+config load instead of a silent divergence discovered later, if ever.
+
+**Cost of being wrong.** A config file with a typo in a key name that
+previously loaded (silently defaulting the misspelled setting) now
+fails to load at all. Checked against `README.md`'s worked example and
+the existing test suite -- both use only recognised keys, so nothing
+that worked before this change stops working; only configs that were
+already silently wrong now say so.
+
 ## Things we got wrong, kept here on purpose
 
 Recorded because the failure *modes* recur, and because a project that only documents

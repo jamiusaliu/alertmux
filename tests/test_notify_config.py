@@ -166,3 +166,99 @@ def test_password_never_appears_in_config_error_when_toml_itself_is_invalid(tmp_
     with pytest.raises(ConfigError) as excinfo:
         load_config(path, env={})
     assert "leak-me-not" not in str(excinfo.value)
+
+
+# --- run_log section: wired through, not silently discarded ---
+
+
+def test_run_log_path_is_honoured(tmp_path):
+    toml = BASIC_TOML + '\n[run_log]\npath = "/some/where/runs.jsonl"\n'
+    path = _write(tmp_path, toml)
+    config = load_config(path, env={})
+    assert config.run_log.path == "/some/where/runs.jsonl"
+
+
+def test_run_log_max_entries_is_honoured(tmp_path):
+    toml = BASIC_TOML + "\n[run_log]\nmax_entries = 25\n"
+    path = _write(tmp_path, toml)
+    config = load_config(path, env={})
+    assert config.run_log.max_entries == 25
+
+
+# --- Strict validation: unknown keys are rejected, not silently defaulted ---
+
+
+def test_unknown_top_level_section_rejected(tmp_path):
+    toml = BASIC_TOML + '\n[bogus]\nfoo = "bar"\n'
+    path = _write(tmp_path, toml)
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path, env={})
+    assert "bogus" in str(excinfo.value)
+
+
+def test_unknown_key_in_smtp_rejected(tmp_path):
+    bad = BASIC_TOML.replace(
+        'sender = "alerts@example.org"',
+        'sender = "alerts@example.org"\nsmtp_typo_key = "oops"',
+        1,
+    )
+    path = _write(tmp_path, bad)
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path, env={})
+    assert "smtp_typo_key" in str(excinfo.value)
+
+
+def test_unknown_key_in_state_rejected(tmp_path):
+    toml = BASIC_TOML + '\n[state]\npathh = "typo.json"\n'
+    path = _write(tmp_path, toml)
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path, env={})
+    assert "pathh" in str(excinfo.value)
+
+
+def test_unknown_key_in_run_log_rejected(tmp_path):
+    toml = BASIC_TOML + "\n[run_log]\nmax_entires = 25\n"
+    path = _write(tmp_path, toml)
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path, env={})
+    assert "max_entires" in str(excinfo.value)
+
+
+def test_unknown_key_in_rule_rejected(tmp_path):
+    bad = BASIC_TOML + '\nseverty_at_least = "Severe"\n'
+    path = _write(tmp_path, bad)
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path, env={})
+    assert "severty_at_least" in str(excinfo.value)
+
+
+def test_bad_key_alongside_password_does_not_leak_password(tmp_path):
+    """A typo elsewhere in the file must not cause the password to show
+    up in the resulting error, even though the password is present and
+    valid in the same document."""
+    bad = BASIC_TOML + '\n[state]\npathh = "typo.json"\n'
+    path = _write(tmp_path, bad)
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path, env={})
+    assert "super-secret-password" not in str(excinfo.value)
+
+
+def test_password_never_appears_when_password_key_itself_is_typoed(tmp_path):
+    """A typo on the password key's own name (passwrd instead of
+    password) must not leak the value the operator wrote for it -- the
+    extra_forbidden error otherwise echoes exactly that value."""
+    bad = """
+[smtp]
+host = "smtp.example.org"
+sender = "a@example.org"
+passwrd = "typoed-secret-value"
+
+[[rules]]
+name = "r"
+to = ["ops@example.org"]
+"""
+    path = _write(tmp_path, bad)
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path, env={})
+    assert "typoed-secret-value" not in str(excinfo.value)
+    assert "passwrd" in str(excinfo.value)

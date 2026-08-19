@@ -21,16 +21,23 @@ import tomllib
 from pathlib import Path
 from typing import Mapping
 
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from alertmux.notify.rules import DEFAULT_MAX_PER_RUN, SEVERITY_ORDER, RuleConfig
 
 _ENV_PREFIX = "ALERTMUX_SMTP_"
 
+# Top-level TOML sections `load_config` reads. Anything else in the file
+# is rejected rather than silently discarded -- see DECISIONS.md on
+# strict config validation.
+_KNOWN_SECTIONS = {"smtp", "rules", "state", "run_log"}
+
 
 class SmtpConfig(BaseModel):
     """BYO SMTP. No default host, no default sender -- this project ships
     no mail infrastructure (DECISIONS.md D11)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     host: str
     port: int = 587
@@ -59,6 +66,8 @@ class SmtpConfig(BaseModel):
 
 
 class StateConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     path: str = "alertmux_notify_state.json"
     # Entries older than this are eligible for pruning. Notified-state
     # rows only need to outlive the window a source might replay an
@@ -71,6 +80,8 @@ class RunLogConfig(BaseModel):
     appended, so `alertmux-dashboard` can show a failed run without the
     notifier process still being alive. See notify/runlog.py."""
 
+    model_config = ConfigDict(extra="forbid")
+
     path: str = "alertmux_notify_runs.jsonl"
     max_entries: int = 500
 
@@ -79,6 +90,8 @@ class RuleConfigModel(BaseModel):
     """The pydantic/TOML-facing shape of a rule. Converts to the frozen
     `rules.RuleConfig` dataclass that actually does the matching, so the
     matching logic stays free of pydantic/TOML concerns entirely."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     to: list[str]
@@ -146,6 +159,8 @@ class RuleConfigModel(BaseModel):
 
 
 class NotifierConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     smtp: SmtpConfig
     rules: list[RuleConfigModel] = Field(default_factory=list)
     state: StateConfig = Field(default_factory=StateConfig)
@@ -188,6 +203,23 @@ def _apply_env_overrides(smtp_dict: dict, env: Mapping[str, str]) -> dict:
     return merged
 
 
+def _sanitize_pydantic_error(exc: Exception) -> str:
+    """Render a pydantic `ValidationError` as field-location-and-reason
+    text only. Never includes `err["input"]` -- pydantic's own message
+    for `extra_forbidden` (an unknown key under `extra="forbid"`) embeds
+    the value written for that key, which would leak a credential typed
+    under a misspelled field name (e.g. `passwrd = "..."`)."""
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return str(exc)
+    lines = []
+    for err in errors():
+        loc = ".".join(str(part) for part in err.get("loc", ()))
+        msg = err.get("msg", "invalid value")
+        lines.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(lines) if lines else str(exc)
+
+
 def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> NotifierConfig:
     """Load and validate a notifier config file (TOML).
 
@@ -206,15 +238,37 @@ def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> Notif
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
 
+    # A silently ignored top-level section is indistinguishable from a
+    # working one until something downstream is quietly wrong -- see
+    # DECISIONS.md on strict config validation. Name the offending key
+    # only, never any value near it, so nothing in a bad key's vicinity
+    # (e.g. a password living under a misspelled section) can leak.
+    unknown_sections = sorted(set(raw) - _KNOWN_SECTIONS)
+    if unknown_sections:
+        raise ConfigError(
+            f"unknown section(s) in {path}: {', '.join(unknown_sections)} "
+            f"(valid sections: {', '.join(sorted(_KNOWN_SECTIONS))})"
+        )
+
     smtp_raw = raw.get("smtp", {})
     smtp_raw = _apply_env_overrides(smtp_raw, env)
     rules_raw = raw.get("rules", [])
     state_raw = raw.get("state", {})
+    run_log_raw = raw.get("run_log", {})
 
     try:
-        return NotifierConfig(smtp=smtp_raw, rules=rules_raw, state=state_raw)
+        return NotifierConfig(
+            smtp=smtp_raw, rules=rules_raw, state=state_raw, run_log=run_log_raw
+        )
     except Exception as exc:  # pydantic ValidationError, deliberately broad
-        # Field names and reasons only. pydantic's own ValidationError
-        # repr does not include SecretStr values, but we still avoid ever
-        # interpolating smtp_raw itself into the message.
-        raise ConfigError(f"invalid notifier config in {path}: {exc}") from exc
+        # Field location and error type only -- never pydantic's own
+        # ValidationError text as-is. pydantic's `extra_forbidden` error
+        # (raised for a typo'd key under `extra="forbid"`) embeds the
+        # *value* the operator wrote for that key in its `input_value=`
+        # rendering, e.g. a typo'd "passwrd = 'secret'" would otherwise
+        # put "secret" straight into this exception. `_sanitize_pydantic_error`
+        # rebuilds the message from each error's `loc`/`type`/`msg` only,
+        # which never includes `input`.
+        raise ConfigError(
+            f"invalid notifier config in {path}: {_sanitize_pydantic_error(exc)}"
+        ) from exc
