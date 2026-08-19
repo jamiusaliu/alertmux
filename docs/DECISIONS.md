@@ -1005,9 +1005,91 @@ contributors have open PRs rewriting `api.py`'s cache, and adding a fourth
 concurrent editor mid-rebase was judged a worse cost than deferring one
 line item. SMTP failure is still loud where the notifier itself runs (a
 non-zero process exit, an ERROR-level log line, and the failed alert
-staying out of state for automatic retry — see D20 through D23) — it is
-just not yet visible through the HTTP API's `/health` endpoint. Tracked as
-a follow-up issue rather than silently dropped from scope.
+staying out of state for automatic retry — see D20 through D23). The
+`/health` half of the spec's sentence is still deferred, tracked as a
+follow-up issue rather than silently dropped from scope. The dashboard
+half is closed by v0.6 — see the three entries below — and is, by the
+spec's own reasoning, the more important half anyway: a notifier that
+silently stops is worse than none, because the operator believes they
+are covered, and `/health` is a machine-monitor endpoint nobody but a
+monitor reads, while the dashboard is where a human actually looks.
+
+## D24 — The dashboard is its own app, not a router mounted on `api.py`
+
+**Decision.** `dashboard/app.py` is a second, independent `FastAPI()`
+instance, with its own cache (`dashboard/collector.py`) and its own
+console script (`alertmux-dashboard`). It imports nothing private from
+`api.py` — not `_collect_shared`, not `_cache`, nothing.
+
+**Why.** Two outside contributors have open PRs rewriting the cache in
+`api.py` (#22, #23). A dashboard built as a router mounted onto `app` (or
+even one that merely called `api._collect_shared` for convenience) would
+hand both PRs a conflict, or worse, a silent behavioural coupling: a
+change to `api.py`'s cache semantics would change the dashboard's
+behaviour without anyone touching `dashboard/` at all. Building a fully
+separate collector costs a little duplication (the same 60s/10s TTL
+policy, copied rather than shared) and buys complete independence: `#22`
+and `#23` can land, in whatever shape, without a rebase touching this
+module.
+
+**Cost of being wrong.** The two TTL policies (api.py's and the
+dashboard's) can drift out of sync if one is tuned later and the other is
+not. That is an acceptable, visible cost — a slightly different cache
+window — against the alternative of a hidden coupling to a module under
+active external rework.
+
+**What would justify changing it.** Once #22/#23 land and `api.py`'s
+cache API stabilises, a shared `alertmux/cache.py` extracted from both
+call sites would be a reasonable follow-up. Not attempted here — doing it
+now would mean guessing at an API two other people are actively
+redesigning.
+
+## D25 — Volume history begins when recording began, not at zero
+
+**Decision.** `dashboard/volume.py`'s `VolumeRecorder.recording_started_at()`
+returns `None` for an empty file, and the dashboard page renders "no data
+yet" for that case — never a chart implying zero alerts.
+
+**Why.** Nothing before v0.6 recorded alert volume over time at all,
+so every dashboard's first run starts with an empty history file. A line
+chart that plots nothing as a flat zero is indistinguishable, to an
+operator glancing at it, from "this source has genuinely carried zero
+alerts the whole time" — which for most sources here is almost never
+true, and is exactly the kind of silently-misleading absence principle 4
+(silent partial success is a bug) exists to prevent, applied to a chart
+instead of an API field.
+
+**Cost of being wrong.** Rendering an honest "no data yet" costs one
+conditional in the page's JS and one extra field in `/api/summary`
+(`volume_recording_started_at`). Getting it wrong costs an operator
+concluding a healthy source has been silent for weeks when the dashboard
+simply had not been running.
+
+## D26 — Notifier run outcomes are now persisted, and only real runs
+
+**Decision.** `notify/runlog.py`'s `RunLogStore` appends one JSONL line
+per real `alertmux-notify` run (sent/suppressed/failed counts, by rule),
+wired into `notify/cli.py`. Dry runs are never logged, mirroring
+`StateStore`, which is likewise never written to on a dry run.
+
+**Why.** `runner.RunReport` already carried everything needed
+(`sent_count`, `suppressed_by_rate_limit`, `failures`) but `runner.py`
+deliberately did not persist it (see its module docstring) — the process
+exits, and with it, the only record that a run happened at all. An
+unattended cron job whose SMTP starts failing leaves no trace once it
+exits non-zero into a cron log nobody reads. This is the exact failure
+mode D24's cross-reference calls out: a notifier that silently stops is
+worse than none, because the operator believes they are covered. The
+dashboard's front page treats a run with any `failures` as impossible to
+miss (a persistent red banner, not a line buried in a table) and a clean
+run as producing no banner at all — a false alarm on every clean run
+would train the operator to ignore the banner exactly when it matters.
+
+**Cost of being wrong.** Every real run now does one small disk append
+(bounded by `[run_log].max_entries`, default 500, pruned the same
+atomic-write way as `state.py`). Negligible against the alternative: a
+failed notifier that looks, from the dashboard, identical to a notifier
+that was never run.
 
 ## Things we got wrong, kept here on purpose
 

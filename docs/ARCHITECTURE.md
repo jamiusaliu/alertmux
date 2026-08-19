@@ -36,7 +36,13 @@ One direction. No writes to any external system. No state except a 60-second cac
 | `notify/state.py` | Persistent JSON seen-state, atomic writes, prunable |
 | `notify/delivery.py` | SMTP delivery via stdlib `smtplib`, verbatim relay message building |
 | `notify/runner.py` | One poll cycle: expiry filter, cross-source dedupe, rule evaluation, rate limit, digest, delivery, state |
+| `notify/runlog.py` | Append-only JSONL log of every real run's outcome (sent/suppressed/failed), so a failed run leaves a trace after the process exits |
 | `notify/cli.py` | `alertmux-notify` console script |
+| `dashboard/collector.py` | The dashboard's own TTL-cached `collect()` wrapper, plus cross-poll source-health memory (last OK, consecutive failures) |
+| `dashboard/volume.py` | Append-only JSONL volume-history recorder, one snapshot per fresh fetch |
+| `dashboard/app.py` | FastAPI, its own app entirely separate from `api.py` — read-only, GET-only |
+| `dashboard/page.py` | The single self-contained HTML page (inline CSS/JS, no build step) |
+| `dashboard/cli.py` | `alertmux-dashboard` console script |
 
 An adapter knows its own source's quirks and **nothing** about any other adapter,
 the query layer, or the API. That isolation is what makes adding a feed a one-file
@@ -499,12 +505,59 @@ explicitly, so this is a printed warning on every run, not a fact the
 operator has to go looking for. See DECISIONS.md's notifier entry for the
 measured counts that motivated this and the full design reasoning.
 
+## dashboard/ — the operational dashboard
+
+Local, read-only, single operator. Entirely separate from `api.py` — its
+own FastAPI app, its own console script (`alertmux-dashboard`), its own
+cache — so the two open PRs rewriting `api.py`'s cache have nothing here
+to conflict with. See DECISIONS.md for why this separation is a hard
+constraint, not a convenience.
+
+```
+query.collect() ──> collector.py (TTL cache + health memory) ──┐
+volume.py (JSONL) <──────────────────────────────────────────┤
+sources.py, registry.py ───────────────────────────────────────┼──> app.py ──> page.py
+notify/runlog.py (JSONL, read only) ───────────────────────────┘
+```
+
+- **`collector.py`**'s `DashboardCollector` wraps `alertmux.query.collect`
+  behind the same TTL policy `api.py` uses (60s complete, 10s partial),
+  but as its own instance — no shared cache, no import of `api.py`
+  internals. On every *fresh* fetch (never a cache hit) it also updates
+  `SourceHealth` per source: `last_ok_at` and `consecutive_failures`,
+  neither of which any existing module tracks, since `query.py` and
+  `sources.py` both only ever describe one fetch at a time.
+
+- **`volume.py`**'s `VolumeRecorder` is an append-only JSONL file, one
+  line per fresh fetch (timestamp, per-source ok/alert_count/latency,
+  totals, `partial`). `prune()` keeps it bounded; `recording_started_at()`
+  returns `None` for an empty file specifically so the page can render
+  "no data yet" rather than a chart that reads as "zero alerts always."
+
+- **`app.py`** exposes exactly three GET routes: `/` (the HTML page),
+  `/api/summary` (source health, coverage, volume history, notification
+  log, registry freshness — one call for everything the page's periodic
+  poll needs), and `/api/alerts` (filterable by authority/severity/event
+  for the live-alerts panel). No route mutates anything; a test asserts
+  the app exposes no non-GET routes.
+
+- **`page.py`** renders one self-contained HTML string: inline CSS and
+  JS, no external assets, no build step. The relay disclaimer and the
+  hazard-classification heuristic caveat are written into the static
+  HTML itself, not only fetched at runtime, so both are present even
+  before the page's first JS poll completes.
+
+- **`cli.py`** is the `alertmux-dashboard` entry point: parse `--host` /
+  `--port` / `--volume-log` / `--run-log`, point the app's persistence at
+  those paths, run uvicorn.
+
 ## What is deliberately absent
 
 `api.py` gained no notifier-related endpoints in this build (see
 `notify/`'s section above for why) — SMTP failure surfacing on `/health`
-remains a follow-up issue, not a design rejection. No accounts, no
-database, no frontend. alertmux reads official feeds, normalises them,
-and (as of the notifier) can relay matching alerts to an operator's own
-inbox; it still never originates a warning. The boundary is legal as
-well as architectural — see `DECISIONS.md`.
+remains a follow-up issue, not a design rejection; the dashboard half of
+that gap is closed instead (see `dashboard/` above). No accounts, no
+database, no frontend build step. alertmux reads official feeds,
+normalises them, and (as of the notifier) can relay matching alerts to an
+operator's own inbox; it still never originates a warning. The boundary
+is legal as well as architectural — see `DECISIONS.md`.

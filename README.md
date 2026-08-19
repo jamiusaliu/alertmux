@@ -187,6 +187,10 @@ sender = "alerts@example.org"
 path = "alertmux_notify_state.json"  # survives restart, prunable
 prune_after_days = 30
 
+[run_log]
+path = "alertmux_notify_runs.jsonl"  # every real run's outcome, appended
+max_entries = 500                    # so alertmux-dashboard can show it
+
 [[rules]]
 name = "nigeria-severe"
 to = ["ops@example.org"]
@@ -267,12 +271,65 @@ silently is worse than no notifier at all.
 ### Known gap
 
 The spec called for SMTP failure to also surface on the dashboard and in
-`/health`. `api.py` currently has open PRs rewriting its cache, so
-touching it here was ruled explicitly out of scope for this build — the
-notifier is a separate process and does not expose an HTTP endpoint of
-its own. SMTP failure is still loud (non-zero exit, ERROR-level log, and
-the alert stays unmarked in state for retry) — it just is not visible
-through `/health` yet. Tracked as a follow-up issue.
+`/health`. The dashboard half now ships (see "Dashboard" below): every
+real run — clean or failed — is appended to `[run_log]`'s JSONL file, and
+a failed run is impossible to miss on the dashboard's front page. The
+`/health` half remains out of scope: `api.py` currently has open PRs
+rewriting its cache, so touching it here was ruled explicitly out for
+this build, and the notifier is a separate process with no HTTP endpoint
+of its own. SMTP failure is still loud independently of both (non-zero
+exit, ERROR-level log, and the alert stays unmarked in state for retry).
+
+## Dashboard
+
+`alertmux-dashboard` is a local, read-only, single-operator dashboard.
+Its purpose is operational confidence — knowing the system is actually
+working — not presentation. It has no accounts and no control that could
+originate, edit, or suppress an alert; every route is a `GET`.
+
+It serves one self-contained HTML page (inline CSS/JS, no build step, no
+CDN — it works offline on a laptop) plus the JSON endpoints that page
+polls, in the spec's priority order:
+
+1. **Source health** — per adapter: ok/down, latency, error, alert
+   count, and consecutive-failure count tracked across polls (something
+   no existing module computes, since every other consumer only ever
+   looks at one fetch at a time).
+2. **Coverage by hazard family and by authority** — reuses `sources.py`
+   directly. Families with zero contributing sources are named
+   explicitly (`uncovered_hazards`), because an authority count alone
+   reads as healthy while whole hazard families have no source at all.
+3. **Live alerts**, filterable by authority, severity, and event
+   substring.
+4. **Volume over time per source** — a source going quiet usually means
+   it broke, not that the weather improved. Backed by a new append-only
+   JSONL recorder (`dashboard/volume.py`), one snapshot per refresh.
+   History begins when recording began: an empty file renders as "no
+   data yet," never as a flat zero.
+5. **Notification log** — what fired, which rule, when, and what was
+   suppressed, read from `alertmux-notify`'s `[run_log]` file
+   (`notify/runlog.py`). A failed run is impossible to miss on the front
+   page; a clean run produces no false alarm.
+6. **Registry freshness** — when the WMO register was last refreshed,
+   and its cache age (via `registry.get_register`, already cached).
+
+It runs its own small TTL cache over `alertmux.query.collect` (60s for a
+complete fetch, 10s for a partial one, same policy as `api.py`, but its
+own instance — no import of `api.py`'s internals, since two open PRs are
+actively rewriting that cache). It never fetches WMO/USGS a second time
+per page load.
+
+Run it:
+
+```bash
+alertmux-dashboard --port 8288
+# --run-log path/to/alertmux_notify_runs.jsonl   # point at your notifier's [run_log].path
+# --volume-log path/to/alertmux_dashboard_volume.jsonl
+```
+
+Then open `http://127.0.0.1:8288/`. A partial fetch, an uncovered hazard
+family, and a failed notifier run are all called out at the top of the
+page rather than left for the operator to notice by their absence.
 
 ## An example alert
 
