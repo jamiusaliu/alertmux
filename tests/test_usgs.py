@@ -9,7 +9,7 @@ import respx
 from alertmux.adapters.usgs import UsgsAdapter
 
 FIXTURE = json.loads(
-    (Path(__file__).parent / "fixtures" / "usgs_all_hour.json").read_text()
+    (Path(__file__).parent / "fixtures" / "usgs_4.5_day.json").read_text()
 )
 NOW = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
 
@@ -21,21 +21,21 @@ def test_parse_returns_one_alert_per_feature():
 
 def test_parse_maps_identity_and_event():
     alert = UsgsAdapter().parse(FIXTURE, NOW)[0]
-    assert alert.id == "usgs:ok2026qcji"
+    assert alert.id == "usgs:us6000tlnv"
     assert alert.event == "earthquake"
-    assert alert.headline == "M 2.3 - 6 km SE of Chickasha, Oklahoma"
-    assert alert.area_description == "6 km SE of Chickasha, Oklahoma"
+    assert alert.headline == "M 4.9 - 79 km N of Ruteng, Indonesia"
+    assert alert.area_description == "79 km N of Ruteng, Indonesia"
 
 
 def test_parse_converts_epoch_millis_to_utc_datetime():
     alert = UsgsAdapter().parse(FIXTURE, NOW)[0]
-    assert alert.sent == datetime.fromtimestamp(1787009589944 / 1000, tz=timezone.utc)
+    assert alert.sent == datetime.fromtimestamp(1787054630174 / 1000, tz=timezone.utc)
 
 
 def test_parse_preserves_geometry():
     alert = UsgsAdapter().parse(FIXTURE, NOW)[0]
     assert alert.geometry["type"] == "Point"
-    assert alert.geometry["coordinates"][0] == pytest.approx(-97.88217163)
+    assert alert.geometry["coordinates"][0] == pytest.approx(120.5751)
 
 
 def test_parse_sets_provenance():
@@ -43,7 +43,7 @@ def test_parse_sets_provenance():
     assert alert.provenance.authority == "us-usgs"
     assert alert.provenance.source_id == "usgs"
     assert alert.provenance.retrieved_at == NOW
-    assert alert.provenance.raw_reference.endswith("ok2026qcji")
+    assert alert.provenance.raw_reference.endswith("us6000tlnv")
 
 
 def test_null_alert_level_is_recorded_as_unavailable_not_guessed():
@@ -59,12 +59,43 @@ def test_null_alert_level_is_recorded_as_unavailable_not_guessed():
 def test_present_alert_level_is_kept_as_source_severity_only():
     """A PAGER level IS present -- the source said something, and it is
     declined on principle (not CAP severity), so severity is unmapped,
-    not unavailable."""
+    not unavailable. FIXTURE[1] is the live M5.7 Mexico quake, PAGER
+    level green — the sort of significant event this feed exists to
+    carry."""
     alert = UsgsAdapter().parse(FIXTURE, NOW)[1]
     assert alert.source_severity == "green"
     assert alert.severity is None
     assert "severity" in alert.unmapped_fields
     assert "severity" not in alert.unavailable_fields
+
+
+def test_default_feed_is_the_magnitude_45_past_day_summary():
+    """The default feed is upstream magnitude-thresholded (M4.5+, past
+    day), not all_hour — see DECISIONS.md D19. The class attribute stays
+    the default so tests and /sources see the same URL as a default
+    instance."""
+    assert UsgsAdapter.URL == (
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/"
+        "summary/4.5_day.geojson"
+    )
+    assert UsgsAdapter().URL == UsgsAdapter.URL
+
+
+def test_constructor_feed_override_changes_the_url():
+    adapter = UsgsAdapter(feed="significant_week")
+    assert adapter.URL == (
+        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/"
+        "summary/significant_week.geojson"
+    )
+
+
+@respx.mock
+def test_fetch_uses_the_configured_feed_url():
+    adapter = UsgsAdapter(feed="4.5_week")
+    respx.get(adapter.URL).mock(return_value=httpx.Response(200, json=FIXTURE))
+    result = adapter.fetch()
+    assert result.ok is True
+    assert result.alerts[0].provenance.source_url == adapter.URL
 
 
 def test_usgs_never_supplies_expiry():
@@ -193,7 +224,7 @@ def test_description_is_none_not_a_copy_of_the_headline():
     alert = UsgsAdapter().parse(FIXTURE, NOW)[0]
     assert alert.description is None
     assert "description" in alert.unavailable_fields
-    assert alert.headline == "M 2.3 - 6 km SE of Chickasha, Oklahoma"
+    assert alert.headline == "M 4.9 - 79 km N of Ruteng, Indonesia"
 
 
 def test_unavailable_fields_is_exhaustive_in_both_directions():

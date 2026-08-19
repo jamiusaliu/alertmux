@@ -504,16 +504,39 @@ corroboration of an event another source is only forecasting.
 ## USGS — earthquakes
 
 ```
-https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson
+https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson
 ```
 
-Clean GeoJSON, no key, well documented upstream. Two traps:
+Clean GeoJSON, no key, well documented upstream. **Default feed is the
+magnitude-thresholded past-day summary (`4.5_day`), deliberately NOT
+`all_hour`** — see DECISIONS.md D19. `all_hour` carries every quake in the
+past hour regardless of magnitude (M0.9-M2 noise), and a 1-hour window barely
+overlaps GDACS; `4.5_day` carries actual hazards and every GDACS earthquake
+(M5.5+) falls inside it, so cross-source dedupe gets the standing overlap it
+was built for. A user seeing no M2 quakes should know that is deliberate —
+see DECISIONS.md D19.
+
+The feed is a constructor argument, not a constant:
+
+```python
+UsgsAdapter()                      # default: summary/4.5_day.geojson
+UsgsAdapter(feed="significant_week")  # impact-level events only
+UsgsAdapter(feed="1.0_day")           # broader net, M1.0+ past day
+```
+
+Any USGS summary name works (`all_day`, `2.5_day`, `significant_week`, ...);
+it is interpolated into the URL, so `provenance.source_url` and `GET /sources`
+report the feed actually configured. Operator choice, not code change.
+
+Three traps:
 
 - **`time` and `updated` are epoch MILLISECONDS.** A seconds-based conversion puts
   events roughly 56,000 years in the future.
 - **`alert` is a PAGER level** (`green`/`yellow`/`orange`/`red`), **not CAP
   severity.** It is kept in `source_severity` only; `severity` stays null. Mapping it
-  to a CAP level would assert a severity USGS never stated.
+  to a CAP level would assert a severity USGS never stated. Observed in the
+  `4.5_day` feed 18 Aug 2026: the M5.7 Mexico and M5.6 Indonesia quakes carry
+  `alert=green`; the rest of the day's M4.5-5.3 events carry `alert=null`.
 - `type` is not always `earthquake` — the feed also emits `quarry blast`,
   `explosion`, `ice quake`, `sonic boom`, `mining explosion`. Never default it.
 - USGS reports *observed* events, so it supplies no `urgency`, `certainty`, `onset`

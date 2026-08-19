@@ -45,12 +45,22 @@ def _require_feature_collection(payload: dict) -> None:
 
 
 class UsgsAdapter:
-    """Fetches and normalises the USGS all-hour earthquake summary."""
+    """Fetches and normalises the USGS magnitude-4.5+ past-day summary.
+
+    The default feed is the upstream magnitude-thresholded
+    ``summary/4.5_day.geojson`` rather than ``all_hour``: a relay carrying
+    every quake in the past hour is mostly M0.9-M2 noise, and it barely
+    overlaps GDACS (see DECISIONS.md D19). ``feed`` is a constructor
+    argument so an operator can choose another USGS summary (e.g.
+    ``significant_week`` for impact-level events only, or ``1.0_day`` for
+    a broader net) without touching code.
+    """
 
     source_id = "usgs"
+    DEFAULT_FEED = "4.5_day"
     URL = (
         "https://earthquake.usgs.gov/earthquakes/feed/v1.0/"
-        "summary/all_hour.geojson"
+        f"summary/{DEFAULT_FEED}.geojson"
     )
 
     # USGS reports observed earthquakes, not forecast warnings: no
@@ -65,9 +75,20 @@ class UsgsAdapter:
         "instruction",
     )
 
-    def __init__(self, client: httpx.Client | None = None, timeout: float = 30.0):
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        timeout: float = 30.0,
+        feed: str = DEFAULT_FEED,
+    ):
         self._client = client
         self._timeout = timeout
+        # Instance-level URL so provenance and /sources report the feed
+        # actually configured, not the class default.
+        self.URL = (
+            "https://earthquake.usgs.gov/earthquakes/feed/v1.0/"
+            f"summary/{feed}.geojson"
+        )
 
     def parse(self, payload: dict, retrieved_at: datetime) -> list[NormalisedAlert]:
         """A malformed envelope (not a FeatureCollection) is a hard

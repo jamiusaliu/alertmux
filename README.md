@@ -12,7 +12,7 @@ the issuing authority.**
 | Source | Coverage |
 |---|---|
 | WMO SWIC | 59 national alerting authorities, warnings currently in force |
-| USGS | Global earthquakes, past hour |
+| USGS | Global earthquakes ≥ M 4.5, past day (feed configurable — see [docs/DATA-SOURCES.md](docs/DATA-SOURCES.md)) |
 | NOAA / NWS | United States, active alerts |
 | GDACS | Global disaster alerts (earthquakes, floods, cyclones, drought, wildfire) |
 | NASA EONET | Satellite-observed events (wildfires, severe storms) — observations, not warnings |
@@ -238,7 +238,7 @@ on third-party uptime. A new adapter's live test belongs in
    simplest example. Note that `FetchResult` requires `retrieved_at` and
    `latency_ms`; neither has a default.
 2. Record a real payload to `tests/fixtures/yoursource_<feed>.json`, matching
-   the existing naming (`swic_effective.json`, `usgs_all_hour.json`).
+   the existing naming (`swic_effective.json`, `usgs_4.5_day.json`).
 3. Write `tests/test_yoursource.py` against that fixture. No network in unit
    tests — use `respx` to mock `fetch()`.
 4. Register it in `src/alertmux/adapters/__init__.py`. This is **three**

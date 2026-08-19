@@ -692,6 +692,66 @@ questions ("did the source say anything" vs "did we choose to translate
 what it said") are genuinely different and both worth asking; collapsing
 them back into one list would restore the original ambiguity for no
 benefit.
+## D19 — USGS relays the M4.5+ past-day feed, not `all_hour`
+
+**Decision.** `UsgsAdapter` defaults to
+`summary/4.5_day.geojson` (magnitude ≥ 4.5, past 24 hours), replacing
+`summary/all_hour.geojson`. The feed is a constructor argument
+(`UsgsAdapter(feed="...")`), so an operator can choose another USGS
+summary without touching code.
+
+**Why not `all_hour`.** Measured 18 Aug 2026 (issue #20): `all_hour`
+carries every quake in the past hour regardless of magnitude — live
+sample M1.3, M0.9, M1.0 — while GDACS reports significant events
+globally over several days (M5.6 Indonesia, M5.7 Mexico, M6.1
+Vanuatu...). Two consequences, both measured: (1) the alerts are mostly
+not hazards — noise against 3,138 alerts from other sources; (2)
+cross-source dedupe barely triggers, because GDACS and USGS coincide
+only when a large quake happens to fall inside the hour. Dedupe's design
+assumed a *standing* overlap; with a 1-hour window there was not one.
+
+**Why `4.5_day` rather than `significant_week`.** Both were named in the
+issue as candidates. `4.5_day` wins on three grounds:
+
+- **Every GDACS earthquake is inside the M4.5+ set.** GDACS's own 18 Aug
+  sample was all M5.5-M6.1, so every GDACS quake now has a USGS
+  counterpart by construction — the standing overlap dedupe was built
+  for, restored. That is what makes cross-source dedupe *meaningful*
+  again: instead of a near-empty intersection of two unrelated lists,
+  dedupe now pairs genuine "same event, two sources" records.
+- **A 24-hour rolling window fits "current alerts".** alertmux relays
+  what is happening now; `significant_week` would hold an M6.1 for seven
+  days after it happened. A quake older than a day dropping out of the
+  feed is a feature.
+- **M4.5+ is where quakes start being felt and damaging.** The relay's
+  job is hazards, and a felt, potentially damaging shake is a hazard.
+
+**Upstream threshold, not client-side filter.** Choosing a threshold feed
+means the filtering happens on USGS's side — cheaper, and there is
+nothing to forget to configure. Client-side filtering of `all_day` was
+rejected: it re-implements (and can drift from) an upstream guarantee.
+The constructor argument covers the one thing upstream thresholds
+cannot: an operator who wants a different bar (e.g. `significant_week`
+for impact-level events only, `1.0_day` for regional coverage).
+
+**The cost, stated plainly.** Everything below M4.5 is *deliberately*
+dropped. A user who sees no M2 quakes in the relay is seeing this
+threshold at work, not a bug: the M2s existed, they are simply below the
+relay's bar. That is the price of the GDACS overlap — a lower bar would
+bring the M0.9-M2 noise back and dissolve the dedupe story. The trade is
+reversible: `UsgsAdapter(feed="1.0_day")` (or `all_hour`) restores the
+small quakes for anyone who wants them, so the cost is a visible,
+operator-side choice, never a silent one.
+
+**What would justify changing the default.** Measured consumer demand
+for impact-only quakes, or evidence that the 24-hour window misses
+events a relay must carry.
+
+**How a user finds out it is deliberate, not broken.** README and
+`docs/DATA-SOURCES.md` both state the feed and the threshold up front,
+and this entry records the reasoning and the tradeoff; a missing M2
+quake therefore has a discoverable explanation instead of reading as a
+defect.
 
 ---
 
