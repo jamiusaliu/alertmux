@@ -124,14 +124,21 @@ def build_server() -> MCPServer:
     ) -> ListAlertsResult:
         response = _collect_cached(default_adapters())
 
-        matching = response.alerts
-        if authority:
-            matching = [a for a in matching if a.provenance.authority == authority]
+        # Authority-only match set is what the unknown-authority guard
+        # inspects. Severity must not fold into that set: a known
+        # authority with no alerts at the requested severity is not
+        # an unknown authority (issue #26).
+        authority_matching = (
+            [a for a in response.alerts if a.provenance.authority == authority]
+            if authority
+            else []
+        )
+        matching = authority_matching if authority else response.alerts
         if severity:
             matching = [a for a in matching if a.severity == severity]
 
         available_authorities = None
-        if authority and not matching:
+        if authority and not authority_matching:
             available_authorities = sorted(
                 {a.provenance.authority for a in response.alerts}
             )
