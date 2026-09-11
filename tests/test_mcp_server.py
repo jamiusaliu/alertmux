@@ -200,3 +200,27 @@ def test_a_failing_adapter_produces_partial_true(monkeypatch):
 
     sources_body = _call(server, "list_sources")
     assert any(not s["ok"] for s in sources_body["sources"])
+
+
+def test_list_alerts_known_authority_nonmatching_severity_is_not_unknown(monkeypatch):
+    """A valid authority with no alerts at the requested severity must
+    not take the unknown-authority branch. available_authorities is
+    only populated when the authority itself is absent from the fetch.
+    """
+    from alertmux import mcp_server
+
+    _patch_adapters(
+        monkeypatch,
+        mcp_server,
+        [FakeAdapter("wmo-swic", alerts=[_alert(severity="Severe")])],
+    )
+    server = mcp_server.build_server()
+    body = _call(
+        server,
+        "list_alerts",
+        {"authority": "ng-nimet", "severity": "Extreme"},
+    )
+
+    assert body["alerts"] == []
+    assert body["available_authorities"] is None
+    assert body["total_matched"] == 0
