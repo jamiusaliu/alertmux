@@ -52,6 +52,13 @@ class ListAlertsResult(BaseModel):
     total_matched: int = 0
     returned: int = 0
     available_authorities: list[str] | None = None
+    # True when `available_authorities` was built from a partial fetch, so an
+    # authority missing from it may simply have had its source down -- not one
+    # that does not exist. Mirrors `/alerts`'s field of the same name (D7,
+    # extended). Without it a short list reads as proof of absence, and the
+    # paraphrase a model produces from that is "there are no alerts for that
+    # authority" -- a more confident claim than the data supports (#24).
+    available_authorities_partial: bool | None = None
     disclaimer: str = DISCLAIMER
 
 
@@ -114,7 +121,12 @@ def build_server() -> MCPServer:
             "exist'. An unknown `authority` returns an empty list "
             "(never an error) and names the authorities that did "
             "answer in `available_authorities`, so a typo can be told "
-            "apart from a genuinely quiet day."
+            "apart from a genuinely quiet day. Check "
+            "`available_authorities_partial` before treating that list "
+            "as complete: when it is true a source was down, so an "
+            "authority absent from the list may still be real and may "
+            "still have alerts. Do not report an authority as unknown "
+            "or as having no alerts on the strength of a partial list."
         )
     )
     def list_alerts(
@@ -138,10 +150,14 @@ def build_server() -> MCPServer:
             matching = [a for a in matching if a.severity == severity]
 
         available_authorities = None
+        available_authorities_partial = None
         if authority and not authority_matching:
             available_authorities = sorted(
                 {a.provenance.authority for a in response.alerts}
             )
+            # Set alongside the list it qualifies, from the same `partial` the
+            # HTTP endpoint uses, so the two surfaces cannot drift apart again.
+            available_authorities_partial = response.partial
 
         total_matched = len(matching)
         returned_alerts = matching[:limit] if limit is not None else matching
@@ -155,6 +171,7 @@ def build_server() -> MCPServer:
             total_matched=total_matched,
             returned=len(returned_alerts),
             available_authorities=available_authorities,
+            available_authorities_partial=available_authorities_partial,
         )
 
     @server.tool(
