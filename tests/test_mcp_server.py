@@ -129,6 +129,93 @@ def test_list_alerts_filters_by_authority(monkeypatch):
     assert body_unknown["available_authorities"] == ["ng-nimet"]
 
 
+def test_unknown_authority_flags_a_partial_available_authorities_list(monkeypatch):
+    """#24: over MCP the consumer paraphrases, so a short list must say so.
+
+    A caller asks about an authority whose source happens to be down. The
+    fetch is partial, the authority is genuinely real, and it is missing from
+    `available_authorities` purely because its source failed. Without the flag
+    that response is indistinguishable from "no such authority" -- which is
+    the false negative #9 fixed for `/alerts`.
+    """
+    from alertmux import mcp_server
+
+    _patch_adapters(
+        monkeypatch,
+        mcp_server,
+        [
+            FakeAdapter("wmo-swic", alerts=[_alert()]),
+            FakeAdapter("usgs", ok=False, error="timeout"),
+        ],
+    )
+    server = mcp_server.build_server()
+
+    body = _call(server, "list_alerts", {"authority": "us-nws"})
+
+    assert body["alerts"] == []
+    # us-nws is real, but its source timed out, so it cannot appear here.
+    assert body["available_authorities"] == ["ng-nimet"]
+    assert body["partial"] is True
+    assert body["available_authorities_partial"] is True
+
+
+def test_available_authorities_partial_is_false_on_a_complete_fetch(monkeypatch):
+    """The flag has to be able to say "no", or it carries no information.
+
+    Every source answered, so a missing authority really is absent and the
+    caller may say so.
+    """
+    from alertmux import mcp_server
+
+    _patch_adapters(
+        monkeypatch, mcp_server, [FakeAdapter("wmo-swic", alerts=[_alert()])]
+    )
+    server = mcp_server.build_server()
+
+    body = _call(server, "list_alerts", {"authority": "does-not-exist"})
+
+    assert body["available_authorities"] == ["ng-nimet"]
+    assert body["partial"] is False
+    assert body["available_authorities_partial"] is False
+
+
+def test_available_authorities_partial_is_absent_when_the_list_is(monkeypatch):
+    """No list to qualify means no flag -- not a bare `false`.
+
+    A `false` next to a null list would read as "the authority list is
+    complete", which is a claim about a list that was never built.
+    """
+    from alertmux import mcp_server
+
+    _patch_adapters(
+        monkeypatch,
+        mcp_server,
+        [
+            FakeAdapter("wmo-swic", alerts=[_alert()]),
+            FakeAdapter("usgs", ok=False, error="timeout"),
+        ],
+    )
+    server = mcp_server.build_server()
+
+    # A matching authority: no ambiguity to resolve, so neither field applies.
+    body = _call(server, "list_alerts", {"authority": "ng-nimet"})
+
+    assert len(body["alerts"]) == 1
+    assert body["available_authorities"] is None
+    assert body["available_authorities_partial"] is None
+
+
+def test_list_alerts_description_tells_the_model_to_check_the_flag():
+    """The description is what a model reads when deciding how to interpret
+    the result, so the flag has to be named there too (#24)."""
+    from alertmux import mcp_server
+
+    server = mcp_server.build_server()
+    tools = {t.name: t for t in _run(server.list_tools())}
+
+    assert "available_authorities_partial" in tools["list_alerts"].description
+
+
 def test_list_alerts_limit_truncation_is_flagged(monkeypatch):
     from alertmux import mcp_server
 
