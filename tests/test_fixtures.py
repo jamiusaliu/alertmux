@@ -20,5 +20,5 @@ def test_fixture_has_no_carriage_returns(path):
     assert b"\r" not in path.read_bytes(), (
         f"{path.name} contains carriage returns, so the checkout rewrote its line "
         "endings. Keep tests/fixtures byte-exact in .gitattributes, then re-checkout: "
-        "git rm -r --cached tests/fixtures && git checkout -- tests/fixtures"
+        "rm -rf tests/fixtures && git checkout -- tests/fixtures"
     )
