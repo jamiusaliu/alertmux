@@ -1,0 +1,5 @@
+# Fixtures are the bytes an authority published, and the tests edit them with
+# exact byte replacements. A checkout that rewrites their line endings
+# (core.autocrlf=true, the Git for Windows default) turns those edits into
+# silent no-ops, so keep them byte-for-byte as committed.
+tests/fixtures/** -text
